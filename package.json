@@ -1,0 +1,13 @@
+{
+  "name": "pi-communication-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Offline agent communication experiments using supplied fixtures and Pi",
+  "engines": { "node": ">=24.0.0" },
+  "scripts": {
+    "demo": "node src/cli.ts compare",
+    "test": "node --test --test-isolation=none tests/*.test.ts",
+    "doctor": "node src/cli.ts doctor"
+  }
+}
