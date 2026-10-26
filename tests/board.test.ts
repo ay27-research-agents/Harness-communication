@@ -198,6 +198,8 @@ test('historical pubsub runs stay readable and incomplete old runs cannot silent
   const original = new Kernel({ topology: 'pubsub', runId: 'old-protocol' });
   const events = original.events.map(event => ({ kind: event.kind, data: structuredClone(event.data) }));
   delete (events.find(event => event.kind === 'run.started')!.data as Record<string, unknown>).pubsubVersion;
+  delete (events.find(event => event.kind === 'run.started')!.data as Record<string, unknown>).subagentLimit;
+  delete (events.find(event => event.kind === 'run.started')!.data as Record<string, unknown>).subagentDemo;
   const journal = new MemoryJournal();
   journal.append(original.runId, events);
   const old = new Kernel({ journal, runId: original.runId });

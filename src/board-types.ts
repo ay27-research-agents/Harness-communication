@@ -1,15 +1,25 @@
-import type { Artifact, JournalEvent, Stage, WorkerId, WorkResult } from './types.ts';
+import type { Artifact, JournalEvent, Scenario, Stage, WorkerId, WorkResult } from './types.ts';
+import { subagentSnapshot, type SpawnRequest, type SubagentRecord } from './subagent-types.ts';
 
 export interface Topic { id: string; title: string; description: string }
 export interface Subscription { topicId: string; reason: string }
+export interface DirectPost {
+  to: WorkerId; topicId?: string; text: string; evidenceRefs: string[]; replyTo?: string;
+}
+export interface DirectMessage extends DirectPost {
+  id: string; from: WorkerId | 'user'; createdAt: string;
+}
 export interface BoardUpdate {
   id: string; topicId: string; author: WorkerId | 'system' | 'user';
   text: string; evidenceRefs: string[]; createdAt: string;
 }
 export interface AgentState {
+  seenRevision?: number;
   agent: WorkerId; subscriptions: Subscription[]; status: string;
   cursors: Record<string, number>; knownRefs: string[];
   seenCatalog: string; seenOwn: string; turnId: string;
+  directCursor?: number;
+  seenSubagents?: string;
 }
 export interface BoardDecision {
   subscriptions: Subscription[];
@@ -18,12 +28,22 @@ export interface BoardDecision {
   createTopics: Topic[];
   publish: { topicId: string; text: string; evidenceRefs: string[] }[];
   work: Stage | null;
+  directMessages?: DirectPost[];
+  spawnSubagents?: SpawnRequest[];
 }
 export interface BoardContext {
+  assessment?: { revision: number; requiredSourceRefs: string[]; changedClaims: string[] };
+  scenario?: Scenario;
   agent: WorkerId; goal: string; capability: Stage;
   catalog: Topic[]; subscriptions: Subscription[]; status: string;
   inbox: BoardUpdate[]; evidence: Artifact[]; availableWork: Stage | null;
-  ownWork: Artifact[]; publishedEvidenceRefs: string[];
+  /** Index only: complete result bodies are already present in evidence. */
+  ownWork: Pick<Artifact, 'id' | 'kind' | 'revision'>[]; publishedEvidenceRefs: string[];
+  directInbox?: DirectMessage[];
+  peers?: { agent: WorkerId; goal: string; subscriptions: Subscription[] }[];
+  transport?: 'inline' | 'socket';
+  delegation?: { canSpawn: boolean; remaining: number; maxDepth: 1; maxPerParent: 1; demo: boolean };
+  subagents?: SubagentRecord[];
 }
 export interface BoardRequest { context: BoardContext; signal?: AbortSignal }
 export type BoardDecider = (request: BoardRequest) => Promise<WorkResult>;
@@ -47,7 +67,8 @@ export function boardSnapshot(events: JournalEvent[]) {
     turnId: string; agent: WorkerId; decision: BoardDecision;
   });
   const settled = events.findLast(e => e.kind === 'board.settled');
-  const activity = events.findLast(e => e.kind.startsWith('board.') && e.kind !== 'board.settled');
-  return { topics, updates, agents: [...agents.values()], decisions,
+  const activity = events.findLast(e => (e.kind.startsWith('board.') || e.kind.startsWith('subagent.') && !e.kind.startsWith('subagent.process.')) && e.kind !== 'board.settled');
+  const directMessages = events.filter(e => e.kind === 'board.direct').map(e => e.data as DirectMessage);
+  return { topics, updates, directMessages, subagents: subagentSnapshot(events), agents: [...agents.values()], decisions,
     settled: Boolean(settled && (!activity || settled.seq > activity.seq)) };
 }

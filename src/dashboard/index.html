@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>LANTERN · Agent communication lab</title>
+  <link rel="stylesheet" href="/style.css"><script src="/app.js" defer></script>
+</head>
+<body>
+  <aside class="rail"><a class="brand" href="#" aria-label="LANTERN home">L<span>•</span></a><div class="rail-label">COMMUNICATION LAB</div><div class="rail-bottom">LOCAL<br>WORKSPACE</div></aside>
+  <main>
+    <header><div><div class="eyebrow">AGENT COMMUNICATION LAB <span class="slash">/</span> LIVE WORKSPACE</div><h1 id="title">LANTERN</h1><p id="subtitle">Connecting to the running harness…</p></div><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">Connecting</span><button id="refresh" class="quiet">Refresh</button></div></header>
+    <div id="notice" class="notice" role="status" hidden></div>
+    <section class="metrics" aria-label="Run overview" id="metrics"></section>
+    <section class="agent-grid" id="agents" aria-label="Agents"></section>
+    <div class="columns">
+      <div class="primary">
+        <section class="panel"><div class="panel-heading"><div><div class="eyebrow">INFORMATION FLOW</div><h2>Who is connected</h2></div><div class="legend"><span class="line-key"></span> Subscription <span class="line-key private"></span> Private message</div></div><div id="network" class="network"></div><p class="caption">Subjects deliver to subscribers. Private messages go directly to one peer. Select a subject below to read its updates.</p></section>
+        <section class="panel"><div class="panel-heading"><div><div class="eyebrow">EVIDENCE & CONCLUSIONS</div><h2>Assessment history</h2></div><label class="compact">Revision <select id="revision"></select></label></div><div id="assessment"></div></section>
+        <section class="panel"><div class="panel-heading"><div><div class="eyebrow">SHARED WORKSPACE</div><h2>Subjects</h2></div><select id="topic" aria-label="Select subject"></select></div><div id="subject"></div></section>
+        <section class="panel"><div class="panel-heading"><div><div class="eyebrow">SOURCE LIBRARY</div><h2>Original & added intelligence</h2></div><span class="muted">Operator view</span></div><div id="sources"></div></section>
+      </div>
+      <aside class="secondary">
+        <section class="panel action-panel"><div class="eyebrow">UPDATE THE EXERCISE</div><h2>Add intelligence</h2><p>Submit a dated source. The team will reassess its conclusions and preserve earlier versions.</p><p id="usage-note" class="caption"></p><button id="example" class="quiet full">Load backup-test example</button><label class="file-label">Or choose a JSON source<input id="source-file" type="file" accept=".json,application/json"></label><form id="intel-form"><label for="source-json">Source document</label><textarea id="source-json" rows="11" spellcheck="false" placeholder="Load the example or choose a JSON file."></textarea><label for="inject-topic">Publish on</label><select id="inject-topic"></select><button id="inject-button" class="primary-button full" type="submit">Add source & reassess <span>↗</span></button></form><div id="inject-result" class="form-result" role="status"></div></section>
+        <section class="panel"><div class="eyebrow">JOIN THE CONVERSATION</div><h2>Send a note</h2><form id="note-form"><label for="note-mode">Delivery</label><select id="note-mode"><option value="post">Shared subject</option><option value="dm">Private message</option></select><label for="note-target">Recipient</label><select id="note-target"></select><label for="note-text">Message</label><textarea id="note-text" rows="3" maxlength="6000" required placeholder="Ask about the evidence or a conclusion…"></textarea><button class="quiet full" type="submit">Send note</button></form><div id="note-result" class="form-result" role="status"></div><p class="caption">Notes prompt discussion. Use Add intelligence to change the assessment evidence.</p></section>
+        <section class="panel"><div class="panel-heading"><div><div class="eyebrow">DELEGATION</div><h2>Temporary helpers</h2></div></div><div id="helpers"></div></section>
+        <section class="panel"><div class="panel-heading"><div><div class="eyebrow">EVENT STREAM</div><h2>Activity</h2></div><select id="activity-filter" aria-label="Filter activity"><option value="all">All</option><option value="publication">Publications</option><option value="direct message">Private messages</option><option value="new intelligence">New intelligence</option><option value="decision">Decisions</option><option value="work completed">Work completed</option><option value="error">Errors</option></select></div><div id="activity" class="activity"></div></section>
+      </aside>
+    </div>
+    <footer><span id="run-label"></span><span>Local operator view · refreshes every 2 seconds · waiting does not call a model</span></footer>
+  </main>
+</body>
+</html>

@@ -60,6 +60,30 @@ function readDatabase(db: string) {
   finally { journal.close(); }
 }
 
+test('CLI intel scenario is explicit, inspectable and resume-fenced without altering inventory defaults', async () => {
+  await temporaryDatabase(async db => {
+    const result = await invoke(['run', 'pubsub', '--scenario', 'intel', '--max-subagents', '0', '--db', db, '--json']);
+    const [report] = jsonOutput(result);
+    assert.equal(report.success, true);
+    assert.equal(report.scenario, 'intel');
+    const inspected = jsonOutput(await invoke(['inspect', report.runId, '--db', db, '--json']));
+    assert.equal(inspected.scenario, 'intel');
+    assert.equal(inspected.artifacts.find((item: any) => item.kind === 'report').data.recommendation, 'hold');
+    const [resumed] = jsonOutput(await invoke(['resume', report.runId, '--db', db, '--json']));
+    assert.equal(resumed.success, true);
+    assert.equal(resumed.metrics.workerCalls, report.metrics.workerCalls);
+    const mismatch = await invoke(['resume', report.runId, '--scenario', 'inventory', '--db', db]);
+    assert.match(String(mismatch.error), /mismatch: scenario/);
+  });
+  await temporaryDatabase(async db => {
+    for (const args of [['run', 'pubsub', '--scenario', 'typo'], ['run', 'coordinator', '--scenario', 'intel'], ['compare', '--scenario', 'intel']]) {
+      const result = await invoke([...args, '--db', db]);
+      assert.ok(result.error);
+      assert.equal(existsSync(db), false);
+    }
+  });
+});
+
 test('CLI help does not create a journal; doctor reports missing installations without credentials', async () => {
   await temporaryDatabase(async (db, directory) => {
     const help = await invoke(['help', '--db', db]);
@@ -79,6 +103,37 @@ test('CLI help does not create a journal; doctor reports missing installations w
     } finally {
       if (previousPath === undefined) delete process.env.PI_PACKAGE_PATH;
       else process.env.PI_PACKAGE_PATH = previousPath;
+    }
+  });
+});
+
+test('CLI inject reads a validated source, invalidates completion, and resumes a versioned assessment', async () => {
+  await temporaryDatabase(async db => {
+    const run = jsonOutput(await invoke(['run', 'pubsub', '--scenario', 'intel', '--max-subagents', '0', '--db', db, '--json']))[0];
+    const source = resolve('examples/beacon-readiness.json');
+    const injected = jsonOutput(await invoke(['inject', run.runId, '--source', source, '--db', db, '--json']));
+    assert.equal(injected.revision, 2);
+    const pending = jsonOutput(await invoke(['inspect', run.runId, '--db', db, '--json']));
+    assert.equal(pending.success, false);
+    assert.equal(pending.assessmentRevision, 2);
+    const [resumed] = jsonOutput(await invoke(['resume', run.runId, '--db', db, '--json']));
+    assert.equal(resumed.success, true);
+    assert.equal(resumed.metrics.workerCalls, 6);
+    const history = resumed.artifacts.filter((item: any) => item.kind === 'report');
+    assert.equal(history.length, 2);
+    assert.deepEqual(history[1].data.unresolvedQuestions, []);
+    const before = readDatabase(db);
+    const duplicate = jsonOutput(await invoke(['inject', run.runId, '--source', source, '--db', db, '--json']));
+    assert.equal(duplicate.duplicate, true);
+    assert.deepEqual(readDatabase(db), before);
+  });
+  await temporaryDatabase(async db => {
+    for (const args of [
+      ['inject', 'missing-run'], ['inject', 'missing-run', '--source', 'package.json'],
+      ['run', 'pubsub', '--dashboard'], ['inspect', 'missing-run', '--source', 'examples/beacon-readiness.json'],
+    ]) {
+      assert.ok((await invoke([...args, '--db', db])).error);
+      assert.equal(existsSync(db), false, 'invalid options/source must fail before creating a journal');
     }
   });
 });

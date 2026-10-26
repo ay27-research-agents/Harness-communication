@@ -1,5 +1,6 @@
 import type { Fixture, InventoryRow } from "./fixtures.ts";
 import type { Artifact, Stage, Worker, WorkResult } from "./types.ts";
+import { scriptedIntelWorker } from './intel.ts';
 
 type Discrepancy = {
   asset: string;
@@ -168,6 +169,7 @@ export function validateResult(stage: Stage, result: WorkResult, inputs: Artifac
 
 /** A reproducible, entirely local worker used to isolate protocol behavior from model behavior. */
 export const scriptedWorker: Worker = async ({ stage, context, signal }) => {
+  if (context.scenario === 'intel') return scriptedIntelWorker({ stage, context, signal });
   signal?.throwIfAborted();
   const fixture = oneArtifact(context.inputs, "fixture");
   const compared = comparison(fixtureData(fixture.data), fixture.id);

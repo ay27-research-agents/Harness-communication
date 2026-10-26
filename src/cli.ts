@@ -1,21 +1,24 @@
 import { parseArgs } from 'node:util';
-import { mkdirSync, writeFileSync } from 'node:fs';
+import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
 import { pathToFileURL } from 'node:url';
 import { Kernel } from './kernel.ts';
 import { SqliteJournal } from './store.ts';
 import { runTopology } from './topologies.ts';
-import { discoverPi } from './pi.ts';
+import { discoverPi, listPiLoginModels } from './pi.ts';
 import { makeWorker } from './experiments.ts';
 import type { WorkerMode } from './experiments.ts';
-import type { Stage, Topology } from './types.ts';
+import type { Scenario, Stage, Topology, WorkerId } from './types.ts';
 import { TopicBoard, formatBoard } from './board.ts';
 import { boardSnapshot } from './board-types.ts';
+import { readRuntime, runtimeCommand, startRuntime } from './runtime.ts';
+import { revisionOf, validateIntelUpdate } from './intel-updates.ts';
 
 const topologies: Topology[] = ['coordinator', 'pubsub', 'routed', 'handoff'];
-const help = `Pi Communication Lab — supplied inventory experiments
+const help = `Pi Communication Lab — synthetic inventory and intelligence experiments
 
 node src/cli.ts doctor
+node src/cli.ts login-models [--pi-package PATH]
 node src/cli.ts compare [--worker scripted|pi-faux|pi] [--duplicates]
 node src/cli.ts run coordinator|pubsub|routed|handoff [options]
 node src/cli.ts list
@@ -24,26 +27,40 @@ node src/cli.ts resume RUN_ID [--provider NAME --model ID]
 node src/cli.ts export RUN_ID [--output runs/report.json]
 node src/cli.ts board RUN_ID [--json]
 node src/cli.ts post RUN_ID --topic SUBJECT --text "Your note"
+node src/cli.ts serve [RUN_ID] [--worker scripted|pi-faux|pi] [--trace]
+node src/cli.ts serve [RUN_ID] --scenario intel --dashboard [--trace]
+node src/cli.ts inject RUN_ID --source PATH.json [--topic intel-brief]
+node src/cli.ts status
+node src/cli.ts dm RUN_ID --to AGENT --text "Private note" [--topic SUBJECT]
+node src/cli.ts stop
 
 Options:
   --db PATH             SQLite journal; default runs/lab.sqlite
   --worker MODE         scripted (default), pi-faux (real SDK/offline), pi (live inference)
+  --scenario NAME       inventory (default) or intel (pubsub only); saved on resume
+  --dashboard           Start a local visual dashboard with serve
+  --source PATH         Dated intelligence source JSON for inject (intel only)
   --provider NAME       Installed Pi built-in provider; live inference only
   --model ID            Installed Pi catalog model ID; live inference only
+  --auth MODE           environment (default) or pi-login (saved Pi OAuth login)
   --pi-package PATH     Override the installed pi-coding-agent package directory
   --duplicates          Inject duplicate pubsub delivery
   --trace               Show pub/sub subscription and work decisions as they happen
   --topic ID            Subject for a user post
-  --text TEXT           Content of a user post (no model call)
+  --to AGENT            Direct message recipient: analyst, reviewer or reporter
+  --text TEXT           Post or direct message. An active service wakes agents automatically.
   --title TEXT          Required when creating a new subject with post
   --description TEXT    Required when creating a new subject with post
   --fail-once STAGE     Inject one analyze/review/report failure
   --timeout MS          Worker deadline; default 30000, max 300000
   --max-attempts N      Persistent per-stage budget; default 2, max 5
+  --max-subagents N     Pub/sub lifetime helper limit, 0..3; new runs default 3
+  --subagent-demo       Scripted/pi-faux reviewer requests one evidence-checking helper
   --json                Print JSON instead of a summary table
   --help                Show this help
 
-Workers compare a bundled synthetic inventory. No live targets or operational tools.
+Workers assess bundled synthetic evidence. No live targets or operational tools.
+Intel: fictional LANTERN conflicting sources, protected dependencies, and uncertainty.
 pi-faux exercises Pi with predetermined responses; it does not measure model quality.
 pi sends fixture context and board notes to your selected provider and may incur usage.
 pubsub workers choose subjects and work; files are written beside the DB in boards/RUN_ID.
@@ -57,44 +74,96 @@ function numberOption(value: string | undefined, name: string): number | undefin
 }
 
 function summary(report: ReturnType<Kernel['report']>) {
-  return { topology: report.topology, worker: report.worker, success: report.success,
+  return { topology: report.topology, scenario: report.scenario, revision: report.assessmentRevision, worker: report.worker, success: report.success,
     messages: report.metrics.messages, calls: report.metrics.workerCalls, decisions: report.metrics.decisionCalls,
-    failures: report.metrics.failedAttempts + report.metrics.decisionFailures, duplicates: report.metrics.duplicatesSuppressed,
+    helpers: report.metrics.subagentsCreated, helperCalls: report.metrics.subagentCalls,
+    failures: report.metrics.failedAttempts + report.metrics.decisionFailures + report.metrics.subagentFailures, duplicates: report.metrics.duplicatesSuppressed,
     handoffs: report.metrics.handoffs, inputTokens: report.metrics.inputTokens,
     outputTokens: report.metrics.outputTokens, runId: report.runId };
 }
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
-    db: { type: 'string' }, worker: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' },
+    db: { type: 'string' }, worker: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, auth: { type: 'string' }, scenario: { type: 'string' },
     'pi-package': { type: 'string' }, duplicates: { type: 'boolean' }, 'fail-once': { type: 'string' },
     timeout: { type: 'string' }, 'max-attempts': { type: 'string' }, output: { type: 'string' },
+    'max-subagents': { type: 'string' }, 'subagent-demo': { type: 'boolean' },
+    dashboard: { type: 'boolean' }, source: { type: 'string' },
     json: { type: 'boolean' }, help: { type: 'boolean' }, trace: { type: 'boolean' },
-    topic: { type: 'string' }, text: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' },
+    topic: { type: 'string' }, text: { type: 'string' }, title: { type: 'string' }, description: { type: 'string' }, to: { type: 'string' },
   } });
   const command = positionals[0] ?? 'help';
   if (values.help || command === 'help') { console.log(help); return; }
-  if (!['doctor', 'compare', 'run', 'list', 'inspect', 'resume', 'export', 'board', 'post'].includes(command)) throw new Error(`Unknown command: ${command}`);
+  if (!['doctor', 'login-models', 'compare', 'run', 'list', 'inspect', 'resume', 'export', 'board', 'post', 'serve', 'status', 'stop', 'dm', 'inject'].includes(command)) throw new Error(`Unknown command: ${command}`);
+  if (values.dashboard && command !== 'serve') throw new Error('--dashboard requires serve');
+  if (values.source && command !== 'inject') throw new Error('--source requires inject');
+  if (values.auth && !['environment', 'pi-login'].includes(values.auth)) throw new Error('--auth must be environment or pi-login');
+  if (command === 'login-models') {
+    const providers = await listPiLoginModels(values['pi-package']);
+    console.log(JSON.stringify(providers, null, 2));
+    if (!providers.length) console.log('No saved OAuth logins. Open Pi and run /login first.');
+    return;
+  }
   if (values.trace && values.json) throw new Error('--trace and --json cannot be combined');
   if (command === 'doctor') {
     const installed = await discoverPi(values['pi-package']);
     console.log(JSON.stringify({ node: process.version, pi: installed,
       testedPiVersion: '0.87.1', sqlite: 'Node built-in',
-      auth: 'Live mode uses environment/ambient credentials; saved Pi login credentials are not loaded.',
+      auth: 'Default: environment credentials. Opt in to saved Pi OAuth with --auth pi-login; list metadata with login-models.',
       next: installed ? 'node src/cli.ts compare --worker pi-faux' : 'Set PI_PACKAGE_PATH to your installed pi-coding-agent directory.',
     }, null, 2));
     if (!installed) process.exitCode = 1;
     return;
   }
   const selectedTopology = positionals[1] as Topology | undefined;
+  const scenario = values.scenario as Scenario | undefined;
+  if (scenario && !['inventory', 'intel'].includes(scenario)) throw new Error('--scenario must be inventory or intel');
+  if (scenario && !['run', 'serve', 'resume'].includes(command)) throw new Error('--scenario is for run, serve, or resume');
+  if (scenario === 'intel' && command === 'run' && selectedTopology !== 'pubsub') throw new Error('Intel scenario requires pubsub');
   if (command === 'run' && (!selectedTopology || !topologies.includes(selectedTopology))) throw new Error('Choose coordinator, pubsub, routed, or handoff');
-  if (['inspect', 'resume', 'export', 'board', 'post'].includes(command) && !positionals[1]) throw new Error('A run ID is required');
+  if (['inspect', 'resume', 'export', 'board', 'post', 'dm', 'inject'].includes(command) && !positionals[1]) throw new Error('A run ID is required');
+  let intelligence: ReturnType<typeof validateIntelUpdate> | undefined;
+  if (command === 'inject') {
+    if (!values.source) throw new Error('inject requires --source PATH.json');
+    if (statSync(values.source).size > 32768) throw new Error('Intelligence source exceeds 32 KiB');
+    intelligence = validateIntelUpdate(JSON.parse(readFileSync(values.source, 'utf8')));
+  }
   const timeoutMs = numberOption(values.timeout, '--timeout');
   const maxAttempts = numberOption(values['max-attempts'], '--max-attempts');
+  const subagentLimit = numberOption(values['max-subagents'], '--max-subagents');
+  if (subagentLimit !== undefined && subagentLimit > 3) throw new Error('--max-subagents must be 0..3');
+  if ((subagentLimit !== undefined || values['subagent-demo']) && !['serve', 'resume'].includes(command) && !(command === 'run' && selectedTopology === 'pubsub')) throw new Error('Subagent options require pubsub run, serve, or resume');
   const failStage = values['fail-once'] as Stage | undefined;
   if (failStage && !['analyze', 'review', 'report'].includes(failStage)) throw new Error('--fail-once must be analyze, review, or report');
   const dbPath = resolve(values.db ?? 'runs/lab.sqlite');
   const boardDirectory = (runId: string) => resolve(dirname(dbPath), 'boards', runId);
+  if (command === 'serve') {
+    if (values.duplicates || failStage) throw new Error('Fault injection is available in run/compare, not serve');
+    const runtime = await startRuntime({ db: dbPath, runId: positionals[1], timeoutMs, maxAttempts, subagentLimit, subagentDemo: values['subagent-demo'], scenario, dashboard: values.dashboard,
+      worker: { mode: (values.worker ?? 'scripted') as WorkerMode, provider: values.provider, model: values.model, authMode: values.auth as 'environment' | 'pi-login' | undefined,
+        packagePath: values['pi-package'], timeoutMs }, trace: values.trace ? line => console.log(line) : undefined });
+    console.log(`Service ready. Run: ${runtime.runId}\nJournal: ${dbPath}\nShared workspace: ${boardDirectory(runtime.runId)}\nUse a second terminal for post, dm, status or stop. Ctrl+C also stops the service.`);
+    if (runtime.dashboardUrl) console.log('Dashboard: ' + runtime.dashboardUrl);
+    const stop = () => { void runtime.close(); };
+    process.once('SIGINT', stop); process.once('SIGTERM', stop);
+    try { await runtime.closed; }
+    finally { process.off('SIGINT', stop); process.off('SIGTERM', stop); await runtime.close(); }
+    return;
+  }
+  if (['status', 'stop'].includes(command) || readRuntime(dbPath)) {
+    if (!['status', 'stop', 'board', 'post', 'dm', 'resume', 'inspect', 'export', 'list', 'inject'].includes(command)) {
+      throw new Error('This database has a running service. Stop it first or choose a different --db.');
+    }
+    const result = await runtimeCommand(dbPath, command, { runId: positionals[1], json: values.json,
+      topic: values.topic, text: values.text, title: values.title, description: values.description, to: values.to, scenario, source: intelligence });
+    if (command === 'export') {
+      const path = resolve(values.output ?? `runs/${positionals[1]}.json`);
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(path, JSON.stringify(result, null, 2) + '\n');
+      console.log(`Exported report and events: ${path}`);
+    } else console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
+    return;
+  }
   const journal = new SqliteJournal(dbPath);
   try {
     if (command === 'list') {
@@ -108,7 +177,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       if (values.json) console.log(JSON.stringify(runs, null, 2)); else console.table(runs.map(run => ({ runId: run.runId, completed: run.completed })));
       return;
     }
-    const savedId = ['inspect', 'export', 'resume', 'board', 'post'].includes(command) ? positionals[1] : undefined;
+    const savedId = ['inspect', 'export', 'resume', 'board', 'post', 'dm', 'inject'].includes(command) ? positionals[1] : undefined;
     const savedEvents = savedId ? journal.read(savedId) : [];
     const saved = savedEvents.find(event => event.kind === 'run.started')?.data as Record<string, unknown> | undefined;
     if (savedId && !saved) throw new Error(`Unknown run: ${savedId}`);
@@ -117,13 +186,27 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       else console.log(formatBoard(savedEvents));
       return;
     }
-    if (command === 'post') {
-      if (!values.topic || !values.text) throw new Error('post requires --topic and --text');
+    if (command === 'inject') {
+      const kernel = new Kernel({ journal, runId: savedId!, workerLabel: String(saved!.workerLabel), recoverInterrupted: false });
+      const result = new TopicBoard(kernel, { directory: boardDirectory(savedId!) }).inject(intelligence, values.topic ?? 'intel-brief');
+      console.log(JSON.stringify(result, null, 2));
+      if (!values.json) console.log('Source saved. Resume this run, or serve it with --dashboard, to let agents reassess.');
+      return;
+    }
+    if (command === 'post' || command === 'dm') {
+      if (command === 'post' && (!values.topic || !values.text)) throw new Error('post requires --topic and --text');
+      if (command === 'dm' && (!values.to || !values.text)) throw new Error('dm requires --to and --text');
       const kernel = new Kernel({ journal, runId: savedId!, workerLabel: String(saved!.workerLabel), recoverInterrupted: false });
       const board = new TopicBoard(kernel, { directory: boardDirectory(savedId!) });
+      if (command === 'dm') {
+        const message = board.direct(values.to as WorkerId, values.text!, values.topic);
+        console.log(JSON.stringify(message, null, 2));
+        if (!values.json) console.log(`Message saved. Use serve ${savedId} for socket delivery and automatic wakeups, or resume for inline delivery.`);
+        return;
+      }
       const exists = board.snapshot.topics.some(topic => topic.id === values.topic);
       if (!exists && (!values.title || !values.description)) throw new Error('A new topic requires --title and --description');
-      const update = board.post(values.topic, values.text, exists ? undefined : { id: values.topic, title: values.title!, description: values.description! });
+      const update = board.post(values.topic!, values.text!, exists ? undefined : { id: values.topic!, title: values.title!, description: values.description! });
       if (values.json) console.log(JSON.stringify(update, null, 2));
       else console.log(`Posted ${update.id}. Resume the run to let agents react: node src/cli.ts resume ${savedId}${values.db ? ` --db ${JSON.stringify(values.db)}` : ''}`);
       return;
@@ -143,7 +226,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       else {
         console.table([summary(report)]);
         for (const issue of report.issues) console.log(`Issue: ${issue}`);
-        const artifact = report.artifacts.find(item => item.kind === 'report');
+        if (report.scenario === 'intel') console.log('Assessment revision: ' + report.assessmentRevision);
+        const artifact = report.artifacts.find(item => item.kind === 'report' && revisionOf(item) === report.assessmentRevision);
         if (artifact) console.log((artifact.data as { text: string }).text);
         if (report.board) console.log(formatBoard(savedEvents));
       }
@@ -153,9 +237,12 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (saved) mode = String(saved.workerLabel).startsWith('pi:') ? 'pi' : saved.workerLabel as WorkerMode;
     const savedPi = saved && String(saved.workerLabel).startsWith('pi:') ? String(saved.workerLabel).slice(3) : undefined;
     const slash = savedPi?.indexOf('/') ?? -1;
+    const authMode = (values.auth ?? saved?.authMode ?? 'environment') as 'environment' | 'pi-login';
+    if ((values['subagent-demo'] ?? saved?.subagentDemo) && mode === 'pi') throw new Error('--subagent-demo is for scripted or pi-faux; live agents decide whether to delegate');
+    if (saved && authMode !== (saved.authMode ?? 'environment')) throw new Error('Resume authentication mode mismatch');
     const workerSpec = await makeWorker({ mode, provider: values.provider ?? (savedPi && slash >= 0 ? savedPi.slice(0, slash) : undefined),
       model: values.model ?? (savedPi && slash >= 0 ? savedPi.slice(slash + 1) : undefined),
-      packagePath: values['pi-package'], timeoutMs });
+      packagePath: values['pi-package'], timeoutMs, authMode });
     const selected = command === 'compare' ? topologies : [saved ? saved.topology as Topology : selectedTopology!];
     const reports: ReturnType<Kernel['report']>[] = [];
     for (const topology of selected) {
@@ -169,10 +256,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         }
         return workerSpec.worker(request);
       } : workerSpec.worker;
-      kernel = new Kernel({ journal, topology, runId: savedId, worker, workerLabel: workerSpec.label,
+      kernel = new Kernel({ journal, topology, runId: savedId, worker, workerLabel: workerSpec.label, authMode,
+        subagentLimit, subagentDemo: values['subagent-demo'], scenario,
         duplicateDelivery: values.duplicates, timeoutMs, maxAttempts });
       try {
-        await runTopology(kernel, { decide: workerSpec.decide, directory: boardDirectory(kernel.runId),
+        await runTopology(kernel, { decide: workerSpec.decide, subagentWorker: workerSpec.subagent, directory: boardDirectory(kernel.runId),
           trace: values.trace ? line => console.log(line) : undefined });
       } catch (error) {
         console.error(`${topology} stopped: ${error instanceof Error ? error.message : String(error)}`);
@@ -183,6 +271,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     if (values.json) console.log(JSON.stringify(reports, null, 2));
     else {
       console.table(reports.map(summary));
+      for (const report of reports) if (report.scenario === 'intel') {
+        const assessment = report.artifacts.find(item => item.kind === 'report' && revisionOf(item) === report.assessmentRevision);
+        if (assessment) console.log('LANTERN assessment: ' + (assessment.data as { text: string }).text);
+        for (const issue of report.issues) console.log('Issue: ' + issue);
+      }
       console.log(`Journal: ${dbPath}`);
       for (const report of reports) if (report.board) console.log(`Shared board files: ${boardDirectory(report.runId)}`);
       console.log(`Inspect a run: node src/cli.ts inspect RUN_ID${values.db ? ` --db ${JSON.stringify(values.db)}` : ''}`);

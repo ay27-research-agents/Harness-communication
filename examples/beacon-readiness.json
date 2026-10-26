@@ -1,0 +1,10 @@
+{
+  "sourceId": "beacon-readiness-test",
+  "title": "BEACON witnessed readiness test",
+  "observedAt": "2026-10-08T10:15:00Z",
+  "recordedAt": "2026-10-08T10:20:00Z",
+  "provenance": "Fictional exercise engineer: signed test record with a named exercise-control witness.",
+  "observations": "The supplied tabletop test record shows BEACON passing the readiness test at 10:15Z. It contains no change to ATLAS medical-telemetry dependencies or the exercise constraints.",
+  "reliability": "direct",
+  "claims": [{ "id": "backup-ready", "status": "confirmed" }]
+}

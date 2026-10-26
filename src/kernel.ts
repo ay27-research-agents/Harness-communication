@@ -1,10 +1,12 @@
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
-import type { Artifact, ContextPackage, Envelope, HandoffRecord, Journal, JournalEvent, Party, Stage, TaskRecord, Topology, Worker, WorkerId, WorkResult } from './types.ts';
+import type { Artifact, ContextPackage, Envelope, HandoffRecord, Journal, JournalEvent, Party, Scenario, Stage, TaskRecord, Topology, Worker, WorkerId, WorkResult } from './types.ts';
 import { MemoryJournal } from './store.ts';
 import { sampleFixture } from './fixtures.ts';
 import { evaluateReport, scriptedWorker, validateResult } from './workers.ts';
 import { boardSnapshot } from './board-types.ts';
+import { intelBrief, intelSources, intelContract, evaluateIntelReport, validateIntelResult, sourceId } from './intel.ts';
+import { currentRevision, revisionArtifacts, revisionOf, validateIntelUpdate, maxIntelUpdates, type AssessmentRevision } from './intel-updates.ts';
 
 const contracts: Record<Stage, string> = {
   analyze: 'Return {data:{discrepancies:[{asset,missing:string[],unexpected:string[],evidenceRefs:string[]}]},summary:string}. Compare the supplied expected and observed inventories exactly. Cite the fixture artifact ID. Include only assets with differences.',
@@ -18,6 +20,10 @@ const terminal = (task: TaskRecord) => task.status === 'completed' || task.statu
 const hashData = (data: unknown): string => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 
 export interface KernelOptions {
+  scenario?: Scenario;
+  subagentLimit?: number;
+  subagentDemo?: boolean;
+  authMode?: 'environment' | 'pi-login';
   journal?: Journal;
   runId?: string;
   topology?: Topology;
@@ -28,10 +34,15 @@ export interface KernelOptions {
   timeoutMs?: number;
   maxContextChars?: number;
   recoverInterrupted?: boolean;
+  signal?: AbortSignal;
 }
 
 /** Owns the only state mutation path. Agents see copies of fixed fixture data. */
 export class Kernel {
+  readonly scenario: Scenario;
+  readonly subagentLimit: number;
+  readonly subagentDemo: boolean;
+  readonly authMode: 'environment' | 'pi-login';
   readonly journal: Journal;
   readonly runId: string;
   readonly topology: Topology;
@@ -42,6 +53,7 @@ export class Kernel {
   readonly maxContextChars: number;
   readonly pubsubVersion: number;
   #worker: Worker;
+  #signal?: AbortSignal;
   #active = new Map<string, AbortController>();
 
   constructor(options: KernelOptions = {}) {
@@ -49,9 +61,20 @@ export class Kernel {
     this.runId = options.runId ?? randomUUID();
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(this.runId)) throw new Error('Invalid run ID');
     const saved = this.events.find(event => event.kind === 'run.started')?.data as Record<string, unknown> | undefined;
+    this.authMode = options.authMode ?? saved?.authMode as 'environment' | 'pi-login' ?? 'environment';
+    if (!['environment', 'pi-login'].includes(this.authMode)) throw new Error('Unknown auth mode');
     this.topology = options.topology ?? saved?.topology as Topology ?? 'coordinator';
     if (!topologyNames.includes(this.topology)) throw new Error('Unknown topology');
     this.pubsubVersion = this.topology === 'pubsub' ? Number(saved ? saved.pubsubVersion ?? 1 : 2) : 0;
+    this.scenario = options.scenario ?? saved?.scenario as Scenario ?? 'inventory';
+    if (!['inventory', 'intel'].includes(this.scenario)) throw new Error('Unknown scenario');
+    if (saved && this.scenario !== (saved.scenario ?? 'inventory')) throw new Error('Resume configuration mismatch: scenario');
+    if (this.scenario === 'intel' && this.pubsubVersion !== 2) throw new Error('Intel scenario requires topic-board pubsub');
+    this.subagentLimit = options.subagentLimit ?? Number(saved ? saved.subagentLimit ?? 0 : this.pubsubVersion === 2 ? 3 : 0);
+    this.subagentDemo = options.subagentDemo ?? Boolean(saved?.subagentDemo);
+    if (!Number.isInteger(this.subagentLimit) || this.subagentLimit < 0 || this.subagentLimit > 3) throw new Error('subagentLimit must be 0..3');
+    if ((this.subagentLimit > 0 || this.subagentDemo) && this.pubsubVersion !== 2) throw new Error('Subagents require topic-board pubsub');
+    if (this.subagentDemo && this.subagentLimit === 0) throw new Error('Subagent demo requires a positive subagent limit');
     this.workerLabel = options.workerLabel ?? 'scripted';
     this.duplicateDelivery = options.duplicateDelivery ?? Boolean(saved?.duplicateDelivery);
     this.timeoutMs = options.timeoutMs ?? Number(saved?.timeoutMs ?? 30000);
@@ -61,17 +84,24 @@ export class Kernel {
     if (!Number.isInteger(this.maxAttempts) || this.maxAttempts < 1 || this.maxAttempts > 5) throw new Error('maxAttempts must be 1..5');
     if (!Number.isInteger(this.maxContextChars) || this.maxContextChars < 1000 || this.maxContextChars > 100000) throw new Error('maxContextChars must be 1000..100000');
     this.#worker = options.worker ?? scriptedWorker;
+    this.#signal = options.signal;
     const config = { topology: this.topology, workerLabel: this.workerLabel, duplicateDelivery: this.duplicateDelivery,
       timeoutMs: this.timeoutMs, maxAttempts: this.maxAttempts, maxContextChars: this.maxContextChars,
-      fixtureHash: hashData(sampleFixture), protocolVersion: 1,
+      fixtureHash: hashData(this.scenario === 'intel' ? { brief: intelBrief, sources: intelSources } : sampleFixture), protocolVersion: 1,
+      ...(this.scenario === 'intel' || saved?.scenario !== undefined ? { scenario: this.scenario } : {}),
+      ...(!saved && this.pubsubVersion === 2 || saved?.subagentLimit !== undefined || options.subagentLimit !== undefined || options.subagentDemo !== undefined
+        ? { subagentLimit: this.subagentLimit, subagentDemo: this.subagentDemo } : {}),
+      ...(this.authMode === 'pi-login' || saved?.authMode ? { authMode: this.authMode } : {}),
       ...(this.pubsubVersion === 2 ? { pubsubVersion: 2 } : {}) };
     if (saved) {
       for (const [key, value] of Object.entries(config)) {
         if (saved[key] !== value) throw new Error(`Resume configuration mismatch: ${key}`);
       }
     } else {
-      const fixture = this.makeArtifact('fixture', sampleFixture, 'system', 'input');
-      this.journal.append(this.runId, [{ kind: 'run.started', data: config }, { kind: 'artifact', data: fixture }]);
+      const fixture = this.makeArtifact('fixture', this.scenario === 'intel' ? intelBrief : sampleFixture, 'system', 'input');
+      const sources = this.scenario === 'intel' ? intelSources.map(source =>
+        ({ kind: 'artifact', data: this.makeArtifact('intel-source', source, 'system', source.sourceId) })) : [];
+      this.journal.append(this.runId, [{ kind: 'run.started', data: config }, { kind: 'artifact', data: fixture }, ...sources]);
     }
     for (const artifact of this.artifacts) {
       if (artifact.hash !== hashData(artifact.data)) throw new Error(`Artifact integrity failure: ${artifact.id}`);
@@ -83,6 +113,40 @@ export class Kernel {
 
   get events(): JournalEvent[] { return this.journal.read(this.runId); }
   get artifacts(): Artifact[] { return this.events.filter(event => event.kind === 'artifact').map(event => event.data as Artifact); }
+  get revision(): number { return this.scenario === 'intel' ? currentRevision(this.events) : 1; }
+  get currentArtifacts(): Artifact[] { return this.scenario === 'intel' ? revisionArtifacts(this.artifacts, this.revision) : this.artifacts; }
+  get assessment(): AssessmentRevision {
+    return this.events.findLast(event => event.kind === 'intel.revision')?.data as AssessmentRevision ??
+      { revision: 1, sourceRefs: this.artifacts.filter(item => item.kind === 'intel-source').map(item => item.id), changedClaims: [] };
+  }
+  get currentTasks(): TaskRecord[] { return this.scenario === 'intel' ? this.tasks.filter(task => revisionOf(task) === this.revision) : this.tasks; }
+  /** Commit the source, revision, and publication together. Repeating a source ID is idempotent. */
+  injectIntelligence(value: unknown, topicId = 'intel-brief') {
+    if (this.scenario !== 'intel' || !this.events.some(event => event.kind === 'board.started')) throw new Error('Start an intel pubsub board before adding intelligence');
+    const update = validateIntelUpdate(value);
+    const existing = this.artifacts.find(item => sourceId(item) === update.sourceId);
+    if (existing) {
+      if (existing.kind !== 'intel-update' || JSON.stringify(existing.data) !== JSON.stringify(update)) throw new Error('Conflicting intelligence source ID');
+      return { revision: revisionOf(existing), artifactRef: existing.id, duplicate: true };
+    }
+    if (this.artifacts.filter(item => item.kind === 'intel-update').length >= maxIntelUpdates) throw new Error('Intelligence update budget exhausted (' + maxIntelUpdates + ')');
+    const board = boardSnapshot(this.events);
+    if (!board.topics.some(topic => topic.id === topicId)) throw new Error('Unknown intelligence subject');
+    if (board.updates.length >= 64) throw new Error('Board update budget exhausted (64)');
+    const revision = this.revision + 1;
+    const artifact = this.makeArtifact('intel-update', update, 'user', 'source-' + update.sourceId, revision);
+    const previous = this.currentArtifacts.find(item => item.kind === 'report');
+    const assessment: AssessmentRevision = { revision, sourceRefs: [...this.assessment.sourceRefs, artifact.id],
+      changedClaims: update.claims.map(item => item.id), ...(previous ? { previousReportRef: previous.id } : {}) };
+    this.journal.append(this.runId, [
+      { kind: 'artifact', data: artifact }, { kind: 'intel.revision', data: assessment },
+      { kind: 'board.update', data: { id: 'intel-source-' + update.sourceId, topicId, author: 'user',
+        text: 'New intelligence for assessment revision ' + revision + ': ' + update.title + '. Observed ' + update.observedAt +
+          '. Source classification: ' + update.reliability + '. ' + update.observations,
+        evidenceRefs: [artifact.id], createdAt: new Date().toISOString() } },
+    ]);
+    return { revision, artifactRef: artifact.id, duplicate: false };
+  }
   get tasks(): TaskRecord[] {
     const latest = new Map<string, TaskRecord>();
     for (const event of this.events) if (event.kind === 'task') {
@@ -101,11 +165,12 @@ export class Kernel {
     if (!task) throw new Error(`Unknown task: ${id}`);
     return task;
   }
-  ensureTask(id: string, owner: WorkerId, objective = 'Compare the supplied inventories and report evidenced differences.'): TaskRecord {
+  ensureTask(id: string, owner: WorkerId, objective = 'Compare the supplied inventories and report evidenced differences.', revision?: number): TaskRecord {
     const existing = this.tasks.find(task => task.id === id);
     if (existing) return existing;
     if (!['analyst', 'reviewer', 'reporter'].includes(owner)) throw new Error('Unknown worker');
-    const task: TaskRecord = { id, owner, objective, status: 'queued', stateVersion: 0, ownershipEpoch: 0, attempt: 0, outputs: {} };
+    const task: TaskRecord = { id, owner, objective, status: 'queued', stateVersion: 0, ownershipEpoch: 0, attempt: 0, outputs: {},
+      ...(revision !== undefined ? { revision } : {}) };
     this.record('task', task);
     return task;
   }
@@ -169,9 +234,10 @@ export class Kernel {
       .some(handoff => ['offered', 'accepted'].includes(this.handoff(handoff.id)!.status));
     if (pending) throw new Error('Task mutation paused during handoff');
   }
-  private makeArtifact(kind: string, data: unknown, producer: string, taskId: string): Artifact {
+  private makeArtifact(kind: string, data: unknown, producer: string, taskId: string, revision?: number): Artifact {
     const hash = hashData(data);
-    return { id: `${this.runId}:${taskId}:${kind}:${hash.slice(0,16)}`, kind, data: structuredClone(data), producer, taskId, hash, createdAt: new Date().toISOString() };
+    return { id: `${this.runId}:${taskId}:${kind}:${hash.slice(0,16)}`, kind, data: structuredClone(data), producer, taskId, hash, createdAt: new Date().toISOString(),
+      ...(revision !== undefined ? { revision } : {}) };
   }
   private context(stage: Stage, task: TaskRecord, inputs: Artifact[]): ContextPackage {
     const recentMessages = this.events.filter(event => event.kind === 'delivery')
@@ -179,7 +245,16 @@ export class Kernel {
       .filter(message => message.recipient === task.owner && message.taskId === task.id).slice(-4);
     const context: ContextPackage = { taskId: task.id, objective: task.objective, stateVersion: task.stateVersion,
       ownershipEpoch: task.ownershipEpoch, inputs: structuredClone(inputs), recentMessages,
-      outputContract: contracts[stage], maxChars: this.maxContextChars };
+      outputContract: this.scenario === 'intel' ? intelContract(stage, revisionOf(task)) : contracts[stage], maxChars: this.maxContextChars,
+      ...(this.scenario === 'intel' ? { scenario: this.scenario } : {}) };
+    if (this.scenario === 'intel') {
+      const previous = this.artifacts.filter(item => revisionOf(item) < revisionOf(task));
+      const analysis = previous.findLast(item => item.kind === 'analysis')?.data as { claims: { id: string; status: string }[] } | undefined;
+      const report = previous.findLast(item => item.kind === 'report')?.data as { recommendation: string } | undefined;
+      context.assessment = { revision: revisionOf(task),
+        ...(analysis ? { previousClaims: analysis.claims.map(({ id, status }) => ({ id, status })) } : {}),
+        ...(report ? { previousRecommendation: report.recommendation } : {}) };
+    }
     while (JSON.stringify(context).length > this.maxContextChars && context.recentMessages.length) context.recentMessages.shift();
     if (JSON.stringify(context).length > this.maxContextChars) throw new Error('Required evidence exceeds context budget');
     return context;
@@ -201,6 +276,7 @@ export class Kernel {
       (event.data as { taskId: string; stage: string }).taskId === taskId && (event.data as { stage: string }).stage === stage).length;
     if (attempts() >= this.maxAttempts) throw new Error('Attempt budget exhausted');
     while (attempts() < this.maxAttempts) {
+      this.#signal?.throwIfAborted();
       let task = this.task(taskId);
       this.assertOwner(task, owner);
       task = { ...task, status: 'running', attempt: task.attempt + 1, stateVersion: task.stateVersion + 1 };
@@ -212,6 +288,8 @@ export class Kernel {
       const start = performance.now();
       let timer: ReturnType<typeof setTimeout> | undefined;
       let abortListener: (() => void) | undefined;
+      const stop = () => controller.abort(new Error('Supervisor stopped'));
+      this.#signal?.addEventListener('abort', stop, { once: true });
       try {
         const stopped = new Promise<never>((_, reject) => {
           abortListener = () => reject(controller.signal.reason ?? new Error('Cancelled'));
@@ -224,11 +302,12 @@ export class Kernel {
         const validUsage = usage && Number.isFinite(usage.input) && Number.isFinite(usage.output) && usage.input >= 0 && usage.output >= 0;
         this.record('worker.response', { taskId, stage, attempt: task.attempt, usage: validUsage ? usage : null });
         if (JSON.stringify(result).length > 64000) throw new Error('Result exceeds 64000 characters');
-        validateResult(stage, result, canonicalInputs);
+        if (this.scenario === 'intel') validateIntelResult(stage, result, canonicalInputs);
+        else validateResult(stage, result, canonicalInputs);
         if (usage && !validUsage) throw new Error('Invalid usage');
         const current = this.task(taskId);
         if (current.owner !== owner || current.ownershipEpoch !== task.ownershipEpoch || current.stateVersion !== task.stateVersion || current.status !== 'running') throw new Error('Stale result rejected');
-        const artifact = this.makeArtifact(kindFor[stage], result.data, owner, taskId);
+        const artifact = this.makeArtifact(kindFor[stage], result.data, owner, taskId, task.revision);
         const completed: TaskRecord = { ...current, outputs: { ...current.outputs, [stage]: artifact.id }, status: final ? 'completed' : 'running', stateVersion: current.stateVersion + 1 };
         this.journal.append(this.runId, [{ kind: 'artifact', data: artifact }, { kind: 'task', data: completed },
           { kind: 'result.accepted', data: { taskId, stage, attempt: task.attempt, artifactRef: artifact.id, summary: result.summary, usage: result.usage ?? { input: 0, output: 0 }, elapsedMs: performance.now() - start } }]);
@@ -241,10 +320,11 @@ export class Kernel {
           changes.push({ kind: 'task', data: { ...current, status: 'failed', stateVersion: current.stateVersion + 1, error: message } });
         }
         this.journal.append(this.runId, changes);
-        if (current.status === 'cancelled' || attempts() >= this.maxAttempts) throw error;
+        if (this.#signal?.aborted || current.status === 'cancelled' || attempts() >= this.maxAttempts) throw error;
       } finally {
         if (timer) clearTimeout(timer);
         if (abortListener) controller.signal.removeEventListener('abort', abortListener);
+        this.#signal?.removeEventListener('abort', stop);
         this.#active.delete(taskId);
       }
     }
@@ -315,31 +395,42 @@ export class Kernel {
     if (handoff.status === 'committed') throw new Error('Committed handoff cannot be aborted');
     if (handoff.status !== 'aborted') this.record('handoff', { ...handoff, status: 'aborted' });
   }
+  evaluate() { return this.scenario === 'intel' ? evaluateIntelReport(this.currentArtifacts) : evaluateReport(this.artifacts); }
   report() {
     const events = this.events;
-    const responses = events.filter(event => ['worker.response', 'board.response'].includes(event.kind)).map(event => event.data as { usage: { input: number; output: number } | null });
+    const responses = events.filter(event => ['worker.response', 'board.response', 'subagent.response'].includes(event.kind)).map(event => event.data as { usage: { input: number; output: number } | null });
     const outcomes = events.filter(event => ['result.accepted', 'attempt.failed'].includes(event.kind)).map(event => event.data as { elapsedMs: number | null });
     const workerCalls = events.filter(event => event.kind === 'attempt.started').length;
     const decisionCalls = events.filter(event => event.kind === 'board.attempt.started').length;
+    const subagentCalls = events.filter(event => event.kind === 'subagent.attempt.started').length;
     const board = this.pubsubVersion === 2 ? boardSnapshot(events) : undefined;
-    const evaluation = evaluateReport(this.artifacts);
+    const evaluation = this.evaluate();
     const issues = [...evaluation.issues];
-    if (this.tasks.some(task => task.status !== 'completed')) issues.push('Some tasks are incomplete');
+    if (this.currentTasks.some(task => task.status !== 'completed')) issues.push('Some tasks are incomplete');
     if (board && !board.settled) issues.push('The topic board has pending activity or has not settled with a published report');
-    return { runId: this.runId, topology: this.topology, worker: this.workerLabel, success: evaluation.success && issues.length === 0, issues,
+    return { runId: this.runId, topology: this.topology, scenario: this.scenario, assessmentRevision: this.revision,
+      worker: this.workerLabel, success: evaluation.success && issues.length === 0, issues,
       metrics: { messages: events.filter(event => ['delivery', 'board.delivery'].includes(event.kind)).length,
         workerCalls, decisionCalls,
+        subagentCalls,
+        subagentsCreated: events.filter(event => event.kind === 'subagent.requested').length,
+        subagentsCompleted: events.filter(event => event.kind === 'subagent.completed').length,
+        subagentsFailed: events.filter(event => event.kind === 'subagent.failed').length,
+        subagentFailures: events.filter(event => event.kind === 'subagent.attempt.failed').length,
         decisionFailures: events.filter(event => event.kind === 'board.attempt.failed').length,
         interruptedDecisionAttempts: events.filter(event => event.kind === 'board.attempt.failed' && (event.data as { interrupted?: boolean }).interrupted).length,
         maxDecisionContextChars: Math.max(0, ...events.filter(event => event.kind === 'board.turn').map(event => JSON.stringify((event.data as { context: unknown }).context).length)),
         publications: board?.updates.length ?? 0,
+        directMessages: board?.directMessages.length ?? 0,
+        directDeliveries: events.filter(event => event.kind === 'board.direct.received').length,
+        directProcessed: events.filter(event => event.kind === 'receipt' && String((event.data as { key: string }).key).startsWith('direct:')).length,
         subscriptions: board?.agents.reduce((sum, agent) => sum + agent.subscriptions.length, 0) ?? 0,
         failedAttempts: events.filter(event => event.kind === 'attempt.failed').length,
         duplicatesSuppressed: events.filter(event => event.kind === 'delivery.duplicate').length,
         handoffs: events.filter(event => event.kind === 'handoff' && (event.data as HandoffRecord).status === 'committed').length,
         inputTokens: responses.reduce((sum, response) => sum + (response.usage?.input ?? 0), 0),
         outputTokens: responses.reduce((sum, response) => sum + (response.usage?.output ?? 0), 0),
-        attemptsWithoutUsage: this.workerLabel === 'scripted' ? 0 : workerCalls + decisionCalls - responses.filter(response => response.usage !== null).length,
+        attemptsWithoutUsage: this.workerLabel === 'scripted' ? 0 : workerCalls + decisionCalls + subagentCalls - responses.filter(response => response.usage !== null).length,
         workerElapsedMs: Math.round(outcomes.reduce((sum, outcome) => sum + (outcome.elapsedMs ?? 0), 0)),
         decisionElapsedMs: Math.round(events.filter(event => ['board.decision', 'board.attempt.failed'].includes(event.kind))
           .reduce((sum, event) => sum + ((event.data as { elapsedMs?: number | null }).elapsedMs ?? 0), 0)),

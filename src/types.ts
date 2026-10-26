@@ -1,9 +1,11 @@
 export type Stage = 'analyze' | 'review' | 'report';
+export type Scenario = 'inventory' | 'intel';
 export type Topology = 'coordinator' | 'pubsub' | 'routed' | 'handoff';
 export type WorkerId = 'analyst' | 'reviewer' | 'reporter';
 export type Party = WorkerId | 'coordinator' | 'broker' | 'router' | 'controller';
 
 export interface Artifact {
+  revision?: number;
   id: string;
   kind: string;
   data: unknown;
@@ -30,6 +32,8 @@ export interface Envelope {
 }
 
 export interface ContextPackage {
+  assessment?: { revision: number; previousClaims?: { id: string; status: string }[]; previousRecommendation?: string };
+  scenario?: Scenario;
   taskId: string;
   objective: string;
   stateVersion: number;
@@ -53,6 +57,7 @@ export interface WorkResult {
 export type Worker = (request: WorkRequest) => Promise<WorkResult>;
 
 export interface TaskRecord {
+  revision?: number;
   id: string;
   owner: WorkerId;
   objective: string;
