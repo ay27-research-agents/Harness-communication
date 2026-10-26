@@ -1,8 +1,8 @@
-# Exercise LANTERN: conflicting intelligence
+# Intelligence exercise: conflicting sources
 
 An intelligence-reconciliation test for the pub/sub harness. Three agents receive different fictional documents and must exchange information before assessing a hypothetical interruption of the ATLAS relay. There are no real targets, scanners, execution tools, or operational actions.
 
-The inventory demo remains the default. LANTERN is selected with `--scenario intel` and currently works only with pub/sub.
+The inventory demo remains the default. The intelligence exercise is selected with `--scenario intel` and currently works only with pub/sub.
 
 For a visual demonstration with new intelligence arriving during the run, see [the dashboard walkthrough](DASHBOARD.md). Start `.\harness.ps1 serve --scenario intel --dashboard --worker scripted --db runs\intel-dashboard.sqlite`, then open the printed Dashboard link.
 
@@ -39,7 +39,7 @@ The scripted demonstration:
 5. The reviewer requests a `chronology-checker` helper with only three selected documents. Its advisory result returns to the reviewer, who performs its own full review.
 6. The reporter publishes the evidence-backed final assessment.
 
-This baseline deliberately requests one helper when the budget permits. `--max-subagents 0` disables helpers; the team can still complete the task. `--subagent-demo` is not needed for LANTERN.
+This baseline deliberately requests one helper when the budget permits. `--max-subagents 0` disables helpers; the team can still complete the task. `--subagent-demo` is not needed for the intelligence exercise.
 
 ## Use actual Pi and direct sockets without model charges
 

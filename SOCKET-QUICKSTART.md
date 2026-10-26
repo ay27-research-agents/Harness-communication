@@ -1,8 +1,8 @@
 # Shared subjects, direct messages, and automatic wakeups
 
-For the more involved intelligence test, add `--scenario intel` to a new service and use a separate database. The [LANTERN walkthrough](INTEL-DEMO.md) explains the distributed source packets, expected assessment, and live Pi commands. The examples below retain the inventory scenario.
+For the more involved intelligence test, add `--scenario intel` to a new service and use a separate database. The [intelligence walkthrough](INTEL-DEMO.md) explains the distributed source packets, expected assessment, and live Pi commands. The examples below retain the inventory scenario.
 
-Add `--dashboard` to `serve` for a local browser view of agents, subjects, messages, helpers, and assessment history. In LANTERN, its **Add intelligence** form triggers a versioned reassessment; ordinary notes only prompt discussion. See [the dashboard walkthrough](DASHBOARD.md).
+Add `--dashboard` to `serve` for a local browser view of agents, subjects, messages, helpers, and assessment history. In the intelligence exercise, its **Add intelligence** form triggers a versioned reassessment; ordinary notes only prompt discussion. See [the dashboard walkthrough](DASHBOARD.md).
 
 Agents can now also request temporary subagents. See the [subagent walkthrough](SUBAGENTS.md). The original three agents remain the board participants; helpers receive selected evidence, report to their parent, and exit.
 

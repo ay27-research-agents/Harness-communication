@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHash } from 'node:crypto';
 import { test } from 'node:test';
 import { existsSync, mkdtempSync, readFileSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
@@ -7,7 +8,7 @@ import { Kernel } from '../src/kernel.ts';
 import { MemoryJournal } from '../src/store.ts';
 import { TopicBoard, validateDecision } from '../src/board.ts';
 import { scriptedBoardDecider } from '../src/board-policy.ts';
-import { evaluateIntelReport, intelInputs, intelSourceOwners, sourceId, validateIntelResult } from '../src/intel.ts';
+import { evaluateIntelReport, intelBrief, legacyIntelBrief, intelSources, intelInputs, intelSourceOwners, sourceId, validateIntelResult } from '../src/intel.ts';
 import type { BoardContext, BoardDecision } from '../src/board-types.ts';
 import type { Artifact, WorkerId } from '../src/types.ts';
 
@@ -18,6 +19,35 @@ async function completed(options: ConstructorParameters<typeof Kernel>[0] = {}) 
   return kernel;
 }
 function data(kernel: Kernel, kind: string): any { return structuredClone(kernel.artifacts.find(item => item.kind === kind)!.data); }
+
+test('neutral exercise labels preserve completion and replay of journals with the original brief', async () => {
+  const hash = (value: unknown) => createHash('sha256').update(JSON.stringify(value)).digest('hex');
+  const seed = new Kernel({ topology: 'pubsub', scenario: 'intel', subagentLimit: 0 });
+  assert.equal((seed.fixture.data as { name: string }).name, 'Conflicting intelligence exercise');
+  const journal = new MemoryJournal();
+  journal.append(seed.runId, seed.events.map(event => {
+    if (event.kind === 'run.started') return { kind: event.kind, data: {
+      ...(event.data as Record<string, unknown>), fixtureHash: hash({ brief: legacyIntelBrief, sources: intelSources }),
+    } };
+    if (event.kind === 'artifact' && (event.data as Artifact).kind === 'fixture') {
+      const briefHash = hash(legacyIntelBrief);
+      return { kind: event.kind, data: { ...(event.data as Artifact), data: legacyIntelBrief, hash: briefHash,
+        id: seed.runId + ':input:fixture:' + briefHash.slice(0, 16) } };
+    }
+    return { kind: event.kind, data: event.data };
+  }));
+  const resumed = new Kernel({ journal, runId: seed.runId });
+  await new TopicBoard(resumed).run();
+  assert.equal(resumed.report().success, true);
+  assert.deepEqual(resumed.fixture.data, legacyIntelBrief, 'historical evidence must remain unchanged');
+  const before = resumed.events.length;
+  const replay = new Kernel({ journal, runId: seed.runId });
+  await new TopicBoard(replay).run();
+  assert.equal(replay.report().success, true);
+  assert.equal(replay.events.length, before);
+  assert.equal(evaluateIntelReport(replay.artifacts.map(item => item.kind === 'fixture'
+    ? { ...item, data: { ...intelBrief, objective: 'Modified exercise' } } : item)).success, false);
+});
 
 test('intel baseline reconciles contradictions, preserves uncertainty, shares subjects, messages, and delegates', async () => {
   const kernel = await completed();
@@ -157,7 +187,7 @@ test('intel readable workspace shows original sources, assignments, specialist, 
     assert.equal(kernel.report().success, true);
     assert.equal(JSON.parse(readFileSync(join(directory, 'assignments.json'), 'utf8')).length, 3);
     assert.match(readFileSync(join(directory, 'README.md'), 'utf8'), /operator audit view/);
-    assert.match(readFileSync(join(directory, 'agents/reviewer/status.md'), 'utf8'), /LANTERN/);
+    assert.match(readFileSync(join(directory, 'agents/reviewer/status.md'), 'utf8'), /intelligence assessment/);
     assert.equal(JSON.parse(readFileSync(join(directory, 'evidence/report.json'), 'utf8')).data.recommendation, 'hold');
     for (const id of Object.keys(intelSourceOwners)) assert.ok(existsSync(join(directory, 'evidence/sources', id + '.json')));
     assert.match(readFileSync(join(directory, 'topics/route-history.md'), 'utf8'), /reviewer/);

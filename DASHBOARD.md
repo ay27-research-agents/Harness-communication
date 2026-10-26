@@ -1,6 +1,6 @@
 # Live intelligence and the visual dashboard
 
-This adds two capabilities to the LANTERN pub/sub exercise: submit new intelligence during a run, and watch the team reassess it in a browser. Earlier assessments are preserved. The other three communication harnesses and the default inventory scenario are unchanged.
+This adds two capabilities to the intelligence pub/sub exercise: submit new intelligence during a run, and watch the team reassess it in a browser. Earlier assessments are preserved. The other three communication harnesses and the default inventory scenario are unchanged.
 
 ## Start here: a demonstration without model usage
 
@@ -15,7 +15,7 @@ Open the complete **Dashboard** link printed in the terminal. Keep that terminal
 1. Wait for **R1 / Assessment complete**. R1 means the first assessment version.
 2. Read **Who is connected** and **Subjects**. Lines show subscriptions; dashed arrows show recorded private-message exchanges, not continuously active traffic.
 3. In **Add intelligence**, click **Load backup-test example**.
-4. Leave **Publish on** set to **LANTERN intelligence brief**, then click **Add source & reassess**.
+4. Leave **Publish on** set to **Intelligence brief**, then click **Add source & reassess**.
 5. Watch R2 become pending, then complete. In **Assessment history**, BEACON readiness changes from **unresolved** to **confirmed**. The recommendation remains **HOLD**: the new test does not remove the protected medical-telemetry dependency.
 6. Select **R1** to inspect the original conclusion. Select **Current** to follow subsequent revisions automatically.
 

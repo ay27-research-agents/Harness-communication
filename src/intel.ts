@@ -3,7 +3,7 @@ import { validateIntelUpdate, type IntelUpdate } from './intel-updates.ts';
 
 /** Fictional tabletop evidence. No hosts, credentials, executable actions, or real targets. */
 export const intelBrief = {
-  scenario: 'intel', version: 1, name: 'Exercise LANTERN — conflicting intelligence',
+  scenario: 'intel', version: 1, name: 'Conflicting intelligence exercise',
   objective: 'Assess whether a hypothetical interruption of the fictional ATLAS relay can be recommended. Reconcile dated sources, identify protected dependencies, and distinguish verified facts from unverified leads. Produce an assessment only; take no action.',
   asOf: '2026-10-08T10:00:00Z',
   questions: [
@@ -13,6 +13,9 @@ export const intelBrief = {
   ],
   instructions: 'Each peer starts with different source documents. Share useful sources through subjects or direct messages. Cite artifact IDs, not source labels. An unverified claim is unresolved, not automatically false. Decide hold or proceed from the supplied constraints. Do not invent new observations.',
 };
+
+// Retain the exact original brief for validating and resuming existing journals.
+export const legacyIntelBrief = { ...intelBrief, name: 'Exercise LANTERN — conflicting intelligence' };
 
 export const intelSources = [
   { sourceId: 'archive-map', title: 'Archived route diagram', recordedAt: '2026-09-01T09:00:00Z',
@@ -32,9 +35,9 @@ export const intelSourceOwners: Record<string, WorkerId> = {
   'archive-map': 'analyst', 'backup-tip': 'analyst', 'current-log': 'reviewer', 'rules-manifest': 'reporter',
 };
 export const intelProfiles: Record<WorkerId, { capability: Stage; goal: string }> = {
-  analyst: { capability: 'analyze', goal: 'Reconcile the three LANTERN intelligence claims. You start with an archived diagram and an unverified tip. Publish these leads early; ask peers for current observations and constraints. After collecting all four sources, analyze chronology, contradictions and uncertainty. Publish your analysis and supporting source IDs.' },
-  reviewer: { capability: 'review', goal: 'Independently audit the LANTERN intelligence assessment. You hold the current change and observation record: share it immediately so peers can reason, even before analysis exists. Compare source dates and provenance, optionally delegate a focused chronology check, then review all four sources and the analysis. Publish review and supporting evidence.' },
-  reporter: { capability: 'report', goal: 'Produce the LANTERN mission assessment. You hold constraints and the protected-service manifest: publish them early, not only after review. Obtain all four sources, analysis and approved review. Recommend hold or proceed based on evidence and constraints, explicitly preserve unresolved questions, then publish the final assessment.' },
+  analyst: { capability: 'analyze', goal: 'Reconcile the three intelligence claims. You start with an archived diagram and an unverified tip. Publish these leads early; ask peers for current observations and constraints. After collecting all four sources, analyze chronology, contradictions and uncertainty. Publish your analysis and supporting source IDs.' },
+  reviewer: { capability: 'review', goal: 'Independently audit the intelligence assessment. You hold the current change and observation record: share it immediately so peers can reason, even before analysis exists. Compare source dates and provenance, optionally delegate a focused chronology check, then review all four sources and the analysis. Publish review and supporting evidence.' },
+  reporter: { capability: 'report', goal: 'Produce the mission assessment. You hold constraints and the protected-service manifest: publish them early, not only after review. Obtain all four sources, analysis and approved review. Recommend hold or proceed based on evidence and constraints, explicitly preserve unresolved questions, then publish the final assessment.' },
 };
 
 const claimContract = 'claims:[{id,status:"confirmed"|"refuted"|"unresolved",evidenceRefs:string[],rationale:string}],supersededSourceRefs:string[]';
@@ -96,7 +99,8 @@ function source(inputs: Artifact[], id: string): Artifact {
   return found[0]!;
 }
 function checkSources(inputs: Artifact[]): void {
-  if (JSON.stringify(one(inputs, 'fixture').data) !== JSON.stringify(intelBrief)) fail('incorrect exercise brief');
+  const brief = JSON.stringify(one(inputs, 'fixture').data);
+  if (brief !== JSON.stringify(intelBrief) && brief !== JSON.stringify(legacyIntelBrief)) fail('incorrect exercise brief');
   for (const expected of intelSources) {
     if (JSON.stringify(source(inputs, expected.sourceId).data) !== JSON.stringify(expected)) fail('source differs from the versioned exercise pack');
   }
@@ -228,7 +232,7 @@ export const scriptedIntelWorker: Worker = async ({ stage, context, signal }) =>
       '. Unresolved questions: ' + (outcome.unresolvedQuestions.join(', ') || 'none') +
       '. Backup evidence alone does not remove the protected-service constraint. Revalidate dependencies and resolve remaining uncertainty before reconsidering. No action is performed.';
   }
-  const result = { data, summary: 'Completed the evidence-linked LANTERN ' + stage + ' stage.' };
+  const result = { data, summary: 'Completed the evidence-linked intelligence ' + stage + ' stage.' };
   validateIntelResult(stage, result, inputs);
   return result;
 };

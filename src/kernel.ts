@@ -5,7 +5,7 @@ import { MemoryJournal } from './store.ts';
 import { sampleFixture } from './fixtures.ts';
 import { evaluateReport, scriptedWorker, validateResult } from './workers.ts';
 import { boardSnapshot } from './board-types.ts';
-import { intelBrief, intelSources, intelContract, evaluateIntelReport, validateIntelResult, sourceId } from './intel.ts';
+import { intelBrief, legacyIntelBrief, intelSources, intelContract, evaluateIntelReport, validateIntelResult, sourceId } from './intel.ts';
 import { currentRevision, revisionArtifacts, revisionOf, validateIntelUpdate, maxIntelUpdates, type AssessmentRevision } from './intel-updates.ts';
 
 const contracts: Record<Stage, string> = {
@@ -85,9 +85,13 @@ export class Kernel {
     if (!Number.isInteger(this.maxContextChars) || this.maxContextChars < 1000 || this.maxContextChars > 100000) throw new Error('maxContextChars must be 1000..100000');
     this.#worker = options.worker ?? scriptedWorker;
     this.#signal = options.signal;
+    let fixtureHash = hashData(this.scenario === 'intel' ? { brief: intelBrief, sources: intelSources } : sampleFixture);
+    if (saved && this.scenario === 'intel' && saved.fixtureHash === hashData({ brief: legacyIntelBrief, sources: intelSources })) {
+      fixtureHash = String(saved.fixtureHash);
+    }
     const config = { topology: this.topology, workerLabel: this.workerLabel, duplicateDelivery: this.duplicateDelivery,
       timeoutMs: this.timeoutMs, maxAttempts: this.maxAttempts, maxContextChars: this.maxContextChars,
-      fixtureHash: hashData(this.scenario === 'intel' ? { brief: intelBrief, sources: intelSources } : sampleFixture), protocolVersion: 1,
+      fixtureHash, protocolVersion: 1,
       ...(this.scenario === 'intel' || saved?.scenario !== undefined ? { scenario: this.scenario } : {}),
       ...(!saved && this.pubsubVersion === 2 || saved?.subagentLimit !== undefined || options.subagentLimit !== undefined || options.subagentDemo !== undefined
         ? { subagentLimit: this.subagentLimit, subagentDemo: this.subagentDemo } : {}),

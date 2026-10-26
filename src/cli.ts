@@ -60,7 +60,7 @@ Options:
   --help                Show this help
 
 Workers assess bundled synthetic evidence. No live targets or operational tools.
-Intel: fictional LANTERN conflicting sources, protected dependencies, and uncertainty.
+Intel: fictional conflicting sources, protected dependencies, and uncertainty.
 pi-faux exercises Pi with predetermined responses; it does not measure model quality.
 pi sends fixture context and board notes to your selected provider and may incur usage.
 pubsub workers choose subjects and work; files are written beside the DB in boards/RUN_ID.
@@ -273,7 +273,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       console.table(reports.map(summary));
       for (const report of reports) if (report.scenario === 'intel') {
         const assessment = report.artifacts.find(item => item.kind === 'report' && revisionOf(item) === report.assessmentRevision);
-        if (assessment) console.log('LANTERN assessment: ' + (assessment.data as { text: string }).text);
+        if (assessment) console.log('Intelligence assessment: ' + (assessment.data as { text: string }).text);
         for (const issue of report.issues) console.log('Issue: ' + issue);
       }
       console.log(`Journal: ${dbPath}`);

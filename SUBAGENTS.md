@@ -1,6 +1,6 @@
 # Bounded agent-created subagents
 
-The existing inventory scenario is unchanged. This delegation capability is also used by the [LANTERN intelligence scenario](INTEL-DEMO.md): its scripted reviewer requests a chronology checker automatically when a helper is available. Live agents choose whether to delegate.
+The existing inventory scenario is unchanged. This delegation capability is also used by the [intelligence scenario](INTEL-DEMO.md): its scripted reviewer requests a chronology checker automatically when a helper is available. Live agents choose whether to delegate.
 
 ## What an agent can do
 

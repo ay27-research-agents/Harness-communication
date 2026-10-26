@@ -55,7 +55,7 @@ async function refresh(force = false) {
   } finally { polling = false; }
 }
 function render() {
-  $('title').textContent = state.scenario === 'intel' ? 'LANTERN' : 'Inventory workspace';
+  $('title').textContent = state.scenario === 'intel' ? 'Intelligence workspace' : 'Inventory workspace';
   $('subtitle').textContent = (state.scenario === 'intel' ? 'Intelligence in motion. Every source, conversation, and assessment.' : 'Follow the team from evidence to a reviewed report.') +
     '  ·  ' + state.worker;
   $('run-label').textContent = 'Run ' + state.runId;

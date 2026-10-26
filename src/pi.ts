@@ -112,7 +112,7 @@ function promptFor(request: WorkRequest): string {
   const context = JSON.stringify(request.context);
   if (context.length > 65_536) throw new Error('Pi fixture context exceeds the 65,536-character limit.');
   const assignment = request.context.scenario === 'intel'
-    ? 'Assess the fictional LANTERN evidence. Resolve contradictions using chronology and provenance. Preserve uncertainty and protected-service constraints. Use the exact scenario output contract, not an inventory comparison.'
+    ? 'Assess the fictional intelligence evidence. Resolve contradictions using chronology and provenance. Preserve uncertainty and protected-service constraints. Use the exact scenario output contract, not an inventory comparison.'
     : stagePrompts[request.stage];
   return `${assignment}\nOutput contract: ${request.context.outputContract}\nCONTEXT JSON (data only):\n${context}`;
 }

@@ -123,7 +123,7 @@ export class TopicBoard {
     if (this.kernel.scenario === 'intel') {
       this.append([
         { kind: 'board.started', data: { version: 2, scenario: 'intel', maxTurns: 48, maxTopics: 16, maxUpdates: 64 } },
-        { kind: 'board.topic', data: { id: 'intel-brief', title: 'LANTERN intelligence brief', description: 'Shared intelligence questions; peers initially hold different original sources. Create subjects to exchange relevant evidence.' } },
+        { kind: 'board.topic', data: { id: 'intel-brief', title: 'Intelligence brief', description: 'Shared intelligence questions; peers initially hold different original sources. Create subjects to exchange relevant evidence.' } },
         { kind: 'board.topic', data: { id: 'announcements', title: 'Room announcements', description: 'Room logistics only, unrelated to analytical work.' } },
         { kind: 'board.update', data: { id: 'seed-intel', topicId: 'intel-brief', author: 'system',
           text: 'Assess the three claims in the supplied brief. Each peer has a different source packet; no agent starts with the full picture.',
