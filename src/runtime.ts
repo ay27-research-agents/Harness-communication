@@ -1,3 +1,6 @@
+import { runBenchmark } from './benchmark.ts';
+import { features as parseFeatures } from './features.ts';
+import type { Features } from './features.ts';
 import { fork, type ChildProcess, type ForkOptions } from 'node:child_process';
 import { randomBytes } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, unlinkSync, writeFileSync } from 'node:fs';
@@ -37,7 +40,7 @@ export async function runtimeCommand(db: string, method: string, data: unknown =
 
 export async function startRuntime(options: {
   db: string; runId?: string; worker?: WorkerConfig; timeoutMs?: number; maxAttempts?: number; trace?: (line: string) => void;
-  subagentLimit?: number; subagentDemo?: boolean; scenario?: Scenario; dashboard?: boolean;
+  maxConcurrentAgents?: number; subagentLimit?: number; subagentDemo?: boolean; scenario?: Scenario; dashboard?: boolean; features?: Partial<Features>;
 }) {
   const db = resolve(options.db);
   if (readRuntime(db)) throw new Error('A service is already running for this database');
@@ -54,8 +57,10 @@ export async function startRuntime(options: {
   const token = secret();
   const lifetime = new AbortController();
   let published = false;
+  let experiment: any = null, experimentFlight: Promise<unknown> = Promise.resolve();
+  let experimentWorker: WorkerConfig;
   const status = () => ({
-    runId: kernel?.runId, pid: process.pid, busy, error: lastError, closing,
+    maxConcurrentAgents: kernel?.maxConcurrentAgents, runId: kernel?.runId, pid: process.pid, busy, error: lastError, closing,
     boardDirectory: kernel ? resolve(dirname(db), 'boards', kernel.runId) : undefined,
     authMode: kernel?.authMode, scenario: kernel?.scenario, assessmentRevision: kernel?.revision, dashboardUrl: dashboard?.url,
     subagentLimit: kernel?.subagentLimit,
@@ -86,6 +91,7 @@ export async function startRuntime(options: {
   };
   const operatorAction = (action: 'inject' | 'post' | 'dm', data: any) => {
     if (closing) throw new Error('Runtime is closing');
+    if (experiment?.status === 'running') throw new Error('Wait for the current experiment to finish');
     if (data?.runId && data.runId !== kernel.runId) throw new Error('Run ID does not match active service');
     if (action === 'inject') {
       const result = board.inject(data.source, data.topic ?? 'intel-brief');
@@ -120,6 +126,9 @@ export async function startRuntime(options: {
       case 'list': return journal.runIds().map(runId => ({ runId, active: runId === kernel.runId }));
       case 'export': return { report: kernel.report(), events: kernel.events };
       case 'resume':
+        if (experiment?.status === 'running') throw new Error('Wait for the current experiment to finish');
+        if (request.data?.maxConcurrentAgents !== undefined && request.data.maxConcurrentAgents !== kernel.maxConcurrentAgents) throw new Error('Resume configuration mismatch: maxConcurrentAgents');
+        if (request.data?.features && JSON.stringify(parseFeatures(request.data.features)) !== JSON.stringify(kernel.features)) throw new Error('Resume configuration mismatch: features');
         if (request.data?.scenario && request.data.scenario !== kernel.scenario) throw new Error('Resume configuration mismatch: scenario');
         wake(); return { queued: true, runId: kernel.runId };
       case 'post': case 'dm': case 'inject': return operatorAction(request.method, request.data);
@@ -138,6 +147,7 @@ export async function startRuntime(options: {
         child.once('exit', () => resolve());
         child.kill();
       })));
+      await experimentFlight.catch(() => {});
       await pump;
       await subagentFlight.catch(() => {});
       await dashboard?.close();
@@ -162,6 +172,7 @@ export async function startRuntime(options: {
       worker = { ...worker, authMode: saved.authMode ?? 'environment', mode: label.startsWith('pi:') ? 'pi' : label as WorkerConfig['mode'],
         ...(label.startsWith('pi:') ? { provider, model: model.join('/') } : {}) };
     }
+    experimentWorker = worker;
     const workerLabel = worker.mode === 'pi' ? `pi:${worker.provider}/${worker.model}` : worker.mode;
     if (worker.mode === 'pi' && (!worker.provider || !worker.model)) throw new Error('Live Pi requires --provider and --model');
     if (worker.authMode === 'pi-login' && worker.mode !== 'pi') throw new Error('--auth pi-login requires --worker pi');
@@ -169,7 +180,7 @@ export async function startRuntime(options: {
     const timeoutMs = Number(saved?.timeoutMs ?? options.timeoutMs ?? 30000);
     // Construct the kernel before spawning so configuration errors cannot leak processes.
     kernel = new Kernel({ journal, topology: 'pubsub', runId: options.runId, workerLabel, authMode: worker.authMode,
-      subagentLimit: options.subagentLimit, subagentDemo: options.subagentDemo, scenario: options.scenario,
+      maxConcurrentAgents: options.maxConcurrentAgents, features: options.features, subagentLimit: options.subagentLimit, subagentDemo: options.subagentDemo, scenario: options.scenario,
       timeoutMs, maxAttempts: options.maxAttempts, signal: lifetime.signal, worker: request => {
         const owner = ({ analyze: 'analyst', review: 'reviewer', report: 'reporter' } as const)[request.stage];
         const peer = peers.get(owner)!;
@@ -233,7 +244,23 @@ export async function startRuntime(options: {
     });
     board.initialize();
     if (options.dashboard) dashboard = await startDashboard({
-      snapshot: () => dashboardState(kernel.events, status()), act: operatorAction,
+      snapshot: () => ({ ...dashboardState(kernel.events, status()), experiment }), act: (action, data) => {
+        if (action !== 'experiment') return operatorAction(action, data);
+        if (closing || busy || experiment?.status === 'running') throw new Error('Wait until the team and any experiment are idle');
+        const repeats = data.repeats ?? 1;
+        if (!Number.isInteger(repeats) || repeats < 1 || repeats > 20) throw new Error('Repeats must be 1..20');
+        if (!['single','compare'].includes(data.mode)) throw new Error('Choose single or compare');
+        const selected = parseFeatures(data.features);
+        const maxConcurrentAgents = data.maxConcurrentAgents ?? kernel.maxConcurrentAgents;
+        if (!Number.isInteger(maxConcurrentAgents) || maxConcurrentAgents < 1 || maxConcurrentAgents > 3) throw new Error('maxConcurrentAgents must be 1..3');
+        experiment = { status: 'running', maxConcurrentAgents, rows: [], summary: [] };
+        experimentFlight = runBenchmark({ maxConcurrentAgents, directory: resolve(dirname(db), 'benchmarks'), worker: experimentWorker, scenario: kernel.scenario,
+          repeats, configurations: data.mode === 'single' ? [{name:'custom', features:selected}] : undefined,
+          signal: lifetime.signal, onProgress: result => { experiment = { ...result, status: 'running' }; } })
+          .then(result => { experiment = { ...result, status: 'complete' }; })
+          .catch(error => { experiment = { ...experiment, status: 'failed', error: error instanceof Error ? error.message : String(error) }; });
+        return { started: true };
+      },
     });
     mkdirSync(dirname(descriptorPath(db)), { recursive: true });
     // Same-user local lab capability. Never log this token or include it in model context.

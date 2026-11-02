@@ -10,6 +10,22 @@
   <main>
     <header><div><div class="eyebrow">AGENT COMMUNICATION LAB <span class="slash">/</span> LIVE WORKSPACE</div><h1 id="title">Intelligence workspace</h1><p id="subtitle">Connecting to the running harness…</p></div><div class="connection"><span id="connection-dot" class="dot"></span><span id="connection">Connecting</span><button id="refresh" class="quiet">Refresh</button></div></header>
     <div id="notice" class="notice" role="status" hidden></div>
+    <section class="panel">
+      <h2>Experiments and usage</h2>
+      <p id="feature-summary"></p><div id="usage-summary"></div>
+      <form id="experiment-form">
+        <p>Start separate trials using this service's model and scenario. Settings stay fixed within each trial.</p>
+        <label><input id="feature-direct" type="checkbox" checked> Direct messages</label>
+        <label><input id="feature-subjects" type="checkbox" checked> Shared subjects</label>
+        <label><input id="feature-helpers" type="checkbox" checked> Helpers</label>
+        <label><input id="feature-intelligence" type="checkbox" checked> New intelligence</label>
+        <label for="experiment-mode">Run</label><select id="experiment-mode"><option value="single">Selected settings</option><option value="compare">Compare four standard configurations</option></select>
+        <label for="experiment-concurrency">Maximum agents working at once</label><select id="experiment-concurrency"><option value="1">1 — sequential</option><option value="2">2</option><option value="3">3</option></select>
+        <label for="experiment-repeats">Repetitions per configuration</label><input id="experiment-repeats" type="number" min="1" max="20" value="1">
+        <p>Comparison uses its four preset settings. Trials use inline delivery; the main team above/below remains your socket service. Live trials consume model account usage.</p>
+        <button type="submit" class="primary-button">Start experiment</button>
+      </form><p id="experiment-result" role="status"></p><div id="benchmark-results"></div>
+    </section>
     <section class="metrics" aria-label="Run overview" id="metrics"></section>
     <section class="agent-grid" id="agents" aria-label="Agents"></section>
     <div class="columns">

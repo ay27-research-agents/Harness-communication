@@ -45,6 +45,9 @@ export function validateTopic(value: unknown): Topic {
 }
 export function validateDecision(value: unknown, context: BoardContext): BoardDecision {
   const item = object(value);
+  if (context.features?.sharedSubjects === false && ['subscriptions', 'createTopics', 'publish'].some(key => !Array.isArray(item[key]) || (item[key] as unknown[]).length)) throw new Error('Shared subjects are disabled');
+  if (context.features?.directMessages === false && array(item.directMessages ?? [], 2).length) throw new Error('Direct messages are disabled');
+  if (context.features?.helpers === false && array(item.spawnSubagents ?? [], 1).length) throw new Error('Helpers are disabled');
   const allowed = ['subscriptions', 'status', 'reason', 'createTopics', 'publish', 'work'];
   if (Object.keys(item).some(key => ![...allowed, 'directMessages', 'spawnSubagents'].includes(key)) || allowed.some(key => !Object.hasOwn(item, key))) throw new Error('Board decision has missing or unknown fields');
   const createTopics = array(item.createTopics, 2).map(validateTopic);
@@ -102,6 +105,7 @@ export function validateDecision(value: unknown, context: BoardContext): BoardDe
 export class TopicBoard {
   readonly kernel: Kernel;
   readonly options: BoardOptions;
+  private directFlight: Promise<void> = Promise.resolve();
   constructor(kernel: Kernel, options: BoardOptions = {}) {
     if (kernel.topology !== 'pubsub' || kernel.pubsubVersion !== 2) throw new Error('This run does not use the topic-board pub/sub protocol');
     this.kernel = kernel;
@@ -137,6 +141,7 @@ export class TopicBoard {
       return;
     }
     this.append([
+      ...(!this.kernel.features.sharedSubjects ? [{ kind: 'board.assignment', data: { agent: 'analyst', evidenceRefs: [this.kernel.fixture.id] } }] : []),
       { kind: 'board.started', data: { version: 2, maxTurns: 48, maxTopics: 16, maxUpdates: 64 } },
       { kind: 'board.topic', data: { id: 'inventory', title: 'Supplied inventory', description: 'Supplied synthetic inventory records: expected and observed service labels.' } },
       { kind: 'board.topic', data: { id: 'announcements', title: 'General announcements', description: 'Social and administrative notes, unrelated to inventory evidence.' } },
@@ -150,7 +155,7 @@ export class TopicBoard {
   private prepare(agent: WorkerId): Omit<Turn, 'id'> | undefined {
     const state = this.state(agent);
     const { topics, updates } = this.snapshot;
-    const followed = new Set(state.subscriptions.map(sub => sub.topicId));
+    const followed = new Set(this.kernel.features.sharedSubjects ? state.subscriptions.map(sub => sub.topicId) : []);
     const unread = this.kernel.events.filter(event => event.kind === 'board.update' &&
       followed.has((event.data as BoardUpdate).topicId) && (event.data as BoardUpdate).author !== agent &&
       event.seq > (state.cursors[(event.data as BoardUpdate).topicId] ?? 0));
@@ -174,7 +179,9 @@ export class TopicBoard {
       const { capability, goal } = profiles[agent];
       const ready = !ownWork.length && (this.kernel.scenario === 'intel' ? Boolean(intelInputs(capability, evidence, this.kernel.assessment.sourceRefs)) : requiredKinds[capability].every(kind => evidence.some(item => item.kind === kind))) &&
         (capability !== 'report' || evidence.some(item => item.kind === 'review' && (item.data as { approved: boolean }).approved));
-      const context: BoardContext = { agent, goal, capability, catalog: topics, subscriptions: state.subscriptions,
+      const context: BoardContext = { agent, goal, capability, catalog: this.kernel.features.sharedSubjects ? topics : [], subscriptions: state.subscriptions,
+        features: this.kernel.features,
+        sentEvidenceRefs: Object.fromEntries(agentIds.filter(id => id !== agent).map(id => [id, [...new Set(messages.filter(m => m.from === agent && m.to === id).flatMap(m => m.evidenceRefs))]])),
         ...(this.kernel.scenario === 'intel' ? { scenario: 'intel' as const,
           assessment: { revision: this.kernel.revision, requiredSourceRefs: this.kernel.assessment.sourceRefs, changedClaims: this.kernel.assessment.changedClaims } } : {}),
         status: state.status, inbox, directInbox, evidence,
@@ -182,7 +189,7 @@ export class TopicBoard {
         availableWork: ready ? capability : null,
         transport: this.options.sendDirect ? 'socket' : 'inline',
         subagents,
-        delegation: { canSpawn: !subagents.length && this.snapshot.subagents.length < this.kernel.subagentLimit,
+        delegation: { canSpawn: this.kernel.features.helpers && !subagents.length && this.snapshot.subagents.length < this.kernel.subagentLimit,
           remaining: Math.max(0, this.kernel.subagentLimit - this.snapshot.subagents.length), maxDepth: 1, maxPerParent: 1, demo: this.kernel.subagentDemo },
         peers: agentIds.filter(id => id !== agent).map(id => ({ agent: id, goal: profiles[id].goal, subscriptions: this.state(id).subscriptions })),
         publishedEvidenceRefs: [...new Set(updates.filter(post => post.author === agent).flatMap(post => post.evidenceRefs))]
@@ -325,10 +332,46 @@ export class TopicBoard {
         .map(item => ({ kind: 'receipt', data: { key: `subagent:${turn.agent}:${item.id}` } }))]);
     this.materialize();
   }
+  // Each slot covers a complete agent turn. A helper replaces its waiting parent
+  // in that slot, so decisions, work, and helpers together respect the limit.
+  private async runConcurrent(): Promise<void> {
+    const active = new Map<WorkerId, Promise<void>>();
+    let failure: unknown;
+    let failed = false;
+    try {
+      for (;;) {
+        this.options.signal?.throwIfAborted();
+        if (failed) throw failure;
+        while (active.size < this.kernel.maxConcurrentAgents) {
+          const events = this.kernel.events;
+          const pending = events.find(event => event.kind === 'board.turn' &&
+            !active.has((event.data as Turn).agent) &&
+            !events.some(item => item.kind === 'board.applied' && (item.data as {turnId:string}).turnId === (event.data as Turn).id));
+          const last = events.findLast(event => event.kind === 'board.turn')?.data as Turn | undefined;
+          const offset = last ? (agentIds.indexOf(last.agent) + 1) % agentIds.length : 0;
+          const prepared = pending ? undefined : [...agentIds.slice(offset), ...agentIds.slice(0, offset)]
+            .filter(agent => !active.has(agent)).map(agent => this.prepare(agent)).find(Boolean);
+          const turn = pending ? pending.data as Turn : prepared ? this.startTurn(prepared) : undefined;
+          if (!turn) break;
+          const flight = Promise.resolve().then(async () => {
+            await this.apply(turn, await this.decision(turn));
+          }).catch(error => { if (!failed) { failed = true; failure = error; } })
+            .finally(() => { active.delete(turn.agent); });
+          active.set(turn.agent, flight);
+        }
+        if (!active.size) return;
+        await Promise.race(active.values());
+      }
+    } finally {
+      // Never return while another model request could still mutate this run.
+      await Promise.allSettled(active.values());
+    }
+  }
   async run(): Promise<void> {
     this.options.signal?.throwIfAborted();
     this.initialize();
     await this.flushDirect();
+    if (this.kernel.maxConcurrentAgents > 1) await this.runConcurrent();
     for (;;) {
       this.options.signal?.throwIfAborted();
       const events = this.kernel.events;
@@ -345,7 +388,7 @@ export class TopicBoard {
       if (next) { this.startTurn(next); continue; }
       const report = this.kernel.currentArtifacts.find(item => item.kind === 'report');
       const complete = this.kernel.evaluate().success && this.kernel.currentTasks.every(task => task.status === 'completed') &&
-        Boolean(report && this.snapshot.updates.some(update => update.author === 'reporter' && update.evidenceRefs.includes(report.id)));
+        Boolean(report && (this.kernel.features.sharedSubjects ? this.snapshot.updates.some(update => update.author === 'reporter' && update.evidenceRefs.includes(report.id)) : this.snapshot.directMessages.some(message => message.from === 'reporter' && message.evidenceRefs.includes(report.id))));
       if (!complete && !this.options.allowIdle) throw new Error('Agents are idle without a published, verified report. Inspect their subscriptions and decisions; the broker will not assign work.');
       if (!complete) { this.materialize(); return; }
       if (!this.snapshot.settled) this.append([{ kind: 'board.settled', data: { completed: true } }]);
@@ -355,6 +398,7 @@ export class TopicBoard {
   }
   post(topicId: string, text: string, descriptor?: Topic): BoardUpdate {
     if (!this.kernel.events.some(event => event.kind === 'board.started')) throw new Error('Start the pub/sub run before posting');
+    if (!this.kernel.features.sharedSubjects) throw new Error('Shared subjects are disabled');
     textValue(text, 6000);
     if (this.snapshot.updates.length >= 64) throw new Error('Board update budget exhausted (64)');
     if (descriptor) this.ensureTopic(validateTopic(descriptor));
@@ -392,6 +436,11 @@ export class TopicBoard {
     }
   }
   private async flushDirect(): Promise<void> {
+    const flight = this.directFlight.then(() => this.flushDirectUnlocked());
+    this.directFlight = flight.catch(() => {});
+    return flight;
+  }
+  private async flushDirectUnlocked(): Promise<void> {
     for (const message of this.snapshot.directMessages) {
       if (this.kernel.events.some(event => event.kind === 'board.direct.received' && (event.data as { id: string }).id === message.id)) continue;
       if (this.options.sendDirect) await this.options.sendDirect(message);
@@ -399,6 +448,7 @@ export class TopicBoard {
     }
   }
   direct(to: WorkerId, text: string, topicId?: string): DirectMessage {
+    if (!this.kernel.features.directMessages) throw new Error('Direct messages are disabled');
     if (!agentIds.includes(to)) throw new Error('Unknown direct message recipient');
     if (topicId && !this.snapshot.topics.some(topic => topic.id === topicId)) throw new Error('Unknown direct message topic');
     const message: DirectMessage = { id: `user-${randomUUID()}`, from: 'user', to,

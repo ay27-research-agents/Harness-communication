@@ -1,3 +1,5 @@
+import { features } from './features.ts';
+import { runBenchmark } from './benchmark.ts';
 import { parseArgs } from 'node:util';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
 import { dirname, resolve } from 'node:path';
@@ -17,6 +19,7 @@ import { revisionOf, validateIntelUpdate } from './intel-updates.ts';
 const topologies: Topology[] = ['coordinator', 'pubsub', 'routed', 'handoff'];
 const help = `Pi Communication Lab — synthetic inventory and intelligence experiments
 
+node src/cli.ts benchmark [--worker scripted|pi-faux|pi] [--repeats N] [--output DIRECTORY]
 node src/cli.ts doctor
 node src/cli.ts login-models [--pi-package PATH]
 node src/cli.ts compare [--worker scripted|pi-faux|pi] [--duplicates]
@@ -38,6 +41,12 @@ Options:
   --db PATH             SQLite journal; default runs/lab.sqlite
   --worker MODE         scripted (default), pi-faux (real SDK/offline), pi (live inference)
   --scenario NAME       inventory (default) or intel (pubsub only); saved on resume
+  --no-direct           Disable private messages (new pubsub runs)
+  --no-subjects         Disable shared subjects (new pubsub runs)
+  --no-helpers          Disable temporary helpers
+  --no-intelligence     Disable added intelligence sources
+  --max-concurrent-agents N  Active agent limit, 1..3; default 1, saved per run
+  --repeats N           Benchmark repetitions per configuration, 1..20
   --dashboard           Start a local visual dashboard with serve
   --source PATH         Dated intelligence source JSON for inject (intel only)
   --provider NAME       Installed Pi built-in provider; live inference only
@@ -84,6 +93,7 @@ function summary(report: ReturnType<Kernel['report']>) {
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
+    'max-concurrent-agents': {type:'string'}, 'no-direct': {type:'boolean'}, 'no-subjects': {type:'boolean'}, 'no-helpers': {type:'boolean'}, 'no-intelligence': {type:'boolean'}, repeats: {type:'string'},
     db: { type: 'string' }, worker: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, auth: { type: 'string' }, scenario: { type: 'string' },
     'pi-package': { type: 'string' }, duplicates: { type: 'boolean' }, 'fail-once': { type: 'string' },
     timeout: { type: 'string' }, 'max-attempts': { type: 'string' }, output: { type: 'string' },
@@ -94,7 +104,29 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   } });
   const command = positionals[0] ?? 'help';
   if (values.help || command === 'help') { console.log(help); return; }
-  if (!['doctor', 'login-models', 'compare', 'run', 'list', 'inspect', 'resume', 'export', 'board', 'post', 'serve', 'status', 'stop', 'dm', 'inject'].includes(command)) throw new Error(`Unknown command: ${command}`);
+  if (!['benchmark', 'doctor', 'login-models', 'compare', 'run', 'list', 'inspect', 'resume', 'export', 'board', 'post', 'serve', 'status', 'stop', 'dm', 'inject'].includes(command)) throw new Error(`Unknown command: ${command}`);
+  const maxConcurrentAgents = numberOption(values['max-concurrent-agents'], '--max-concurrent-agents');
+  if (maxConcurrentAgents !== undefined && (!Number.isInteger(maxConcurrentAgents) || maxConcurrentAgents < 1 || maxConcurrentAgents > 3)) throw new Error('--max-concurrent-agents must be 1..3');
+  if (maxConcurrentAgents !== undefined && !['run','serve','resume','benchmark'].includes(command)) throw new Error('--max-concurrent-agents requires pubsub run, serve, resume, or benchmark');
+  if (maxConcurrentAgents !== undefined && command === 'run' && positionals[1] !== 'pubsub') throw new Error('Concurrency settings require pubsub');
+  const featureFlags = ['no-direct','no-subjects','no-helpers','no-intelligence'] as const;
+  const selectedFeatures = featureFlags.some(key => values[key]) ? features({ directMessages: !values['no-direct'], sharedSubjects: !values['no-subjects'], helpers: !values['no-helpers'], newIntelligence: !values['no-intelligence'] }) : undefined;
+  if (selectedFeatures && !['run','serve','resume','benchmark'].includes(command)) throw new Error('Feature flags require a new run or matching resume');
+  if (values.repeats && command !== 'benchmark') throw new Error('--repeats requires benchmark');
+  if (command === 'benchmark') {
+    const allowed = new Set(['max-concurrent-agents','worker','provider','model','auth','scenario','pi-package','timeout','output','json','repeats',...featureFlags]);
+    for (const key of Object.keys(values)) if (!allowed.has(key)) throw new Error('Unsupported benchmark option: --' + key);
+    if (positionals.length !== 1) throw new Error('benchmark does not take positional arguments');
+    if (values.auth && !['environment','pi-login'].includes(values.auth)) throw new Error('--auth must be environment or pi-login');
+    const result = await runBenchmark({ maxConcurrentAgents, directory: resolve(values.output ?? 'runs/benchmarks'), repeats: numberOption(values.repeats, '--repeats'),
+      scenario: (values.scenario ?? 'intel') as Scenario,
+      configurations: selectedFeatures ? [{ name: 'custom', features: selectedFeatures }] : undefined,
+      worker: { mode: (values.worker ?? 'scripted') as WorkerMode, provider: values.provider, model: values.model,
+        authMode: values.auth as 'environment' | 'pi-login' | undefined, timeoutMs: numberOption(values.timeout, '--timeout'), packagePath: values['pi-package'] } });
+    if (values.json) console.log(JSON.stringify(result, null, 2)); else { console.log('Worker: ' + result.worker + ' · Usage: ' + (result.rows[0]?.report.usage.measurement ?? 'unavailable') + ' · Transport: inline · Active agent limit: ' + result.maxConcurrentAgents); console.table(result.summary); console.log('Results: ' + result.directory); }
+    return;
+  }
+  if (selectedFeatures && command === 'run' && positionals[1] !== 'pubsub') throw new Error('Feature switches require pubsub');
   if (values.dashboard && command !== 'serve') throw new Error('--dashboard requires serve');
   if (values.source && command !== 'inject') throw new Error('--source requires inject');
   if (values.auth && !['environment', 'pi-login'].includes(values.auth)) throw new Error('--auth must be environment or pi-login');
@@ -139,7 +171,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const boardDirectory = (runId: string) => resolve(dirname(dbPath), 'boards', runId);
   if (command === 'serve') {
     if (values.duplicates || failStage) throw new Error('Fault injection is available in run/compare, not serve');
-    const runtime = await startRuntime({ db: dbPath, runId: positionals[1], timeoutMs, maxAttempts, subagentLimit, subagentDemo: values['subagent-demo'], scenario, dashboard: values.dashboard,
+    const runtime = await startRuntime({ maxConcurrentAgents, features: selectedFeatures, db: dbPath, runId: positionals[1], timeoutMs, maxAttempts, subagentLimit, subagentDemo: values['subagent-demo'], scenario, dashboard: values.dashboard,
       worker: { mode: (values.worker ?? 'scripted') as WorkerMode, provider: values.provider, model: values.model, authMode: values.auth as 'environment' | 'pi-login' | undefined,
         packagePath: values['pi-package'], timeoutMs }, trace: values.trace ? line => console.log(line) : undefined });
     console.log(`Service ready. Run: ${runtime.runId}\nJournal: ${dbPath}\nShared workspace: ${boardDirectory(runtime.runId)}\nUse a second terminal for post, dm, status or stop. Ctrl+C also stops the service.`);
@@ -155,7 +187,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       throw new Error('This database has a running service. Stop it first or choose a different --db.');
     }
     const result = await runtimeCommand(dbPath, command, { runId: positionals[1], json: values.json,
-      topic: values.topic, text: values.text, title: values.title, description: values.description, to: values.to, scenario, source: intelligence });
+      maxConcurrentAgents, features: selectedFeatures, topic: values.topic, text: values.text, title: values.title, description: values.description, to: values.to, scenario, source: intelligence });
     if (command === 'export') {
       const path = resolve(values.output ?? `runs/${positionals[1]}.json`);
       mkdirSync(dirname(path), { recursive: true });
@@ -256,7 +288,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         }
         return workerSpec.worker(request);
       } : workerSpec.worker;
-      kernel = new Kernel({ journal, topology, runId: savedId, worker, workerLabel: workerSpec.label, authMode,
+      kernel = new Kernel({ maxConcurrentAgents, features: selectedFeatures, journal, topology, runId: savedId, worker, workerLabel: workerSpec.label, authMode,
         subagentLimit, subagentDemo: values['subagent-demo'], scenario,
         duplicateDelivery: values.duplicates, timeoutMs, maxAttempts });
       try {

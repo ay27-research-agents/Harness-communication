@@ -1,3 +1,5 @@
+import { features, type Features } from './features.ts';
+import { usageReport } from './usage.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { performance } from 'node:perf_hooks';
 import type { Artifact, ContextPackage, Envelope, HandoffRecord, Journal, JournalEvent, Party, Scenario, Stage, TaskRecord, Topology, Worker, WorkerId, WorkResult } from './types.ts';
@@ -20,6 +22,8 @@ const terminal = (task: TaskRecord) => task.status === 'completed' || task.statu
 const hashData = (data: unknown): string => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 
 export interface KernelOptions {
+  features?: Partial<Features>;
+  maxConcurrentAgents?: number;
   scenario?: Scenario;
   subagentLimit?: number;
   subagentDemo?: boolean;
@@ -39,6 +43,8 @@ export interface KernelOptions {
 
 /** Owns the only state mutation path. Agents see copies of fixed fixture data. */
 export class Kernel {
+  readonly features: Features;
+  readonly maxConcurrentAgents: number;
   readonly scenario: Scenario;
   readonly subagentLimit: number;
   readonly subagentDemo: boolean;
@@ -61,6 +67,11 @@ export class Kernel {
     this.runId = options.runId ?? randomUUID();
     if (!/^[A-Za-z0-9_-]{1,80}$/.test(this.runId)) throw new Error('Invalid run ID');
     const saved = this.events.find(event => event.kind === 'run.started')?.data as Record<string, unknown> | undefined;
+    this.maxConcurrentAgents = options.maxConcurrentAgents ?? Number(saved?.maxConcurrentAgents ?? 1);
+    if (!Number.isInteger(this.maxConcurrentAgents) || this.maxConcurrentAgents < 1 || this.maxConcurrentAgents > 3) throw new Error('maxConcurrentAgents must be 1..3');
+    if (saved && this.maxConcurrentAgents !== Number(saved.maxConcurrentAgents ?? 1)) throw new Error('Resume configuration mismatch: maxConcurrentAgents');
+    this.features = features(saved?.features ?? options.features);
+    if (saved && options.features && JSON.stringify(features(options.features)) !== JSON.stringify(this.features)) throw new Error('Resume configuration mismatch: features');
     this.authMode = options.authMode ?? saved?.authMode as 'environment' | 'pi-login' ?? 'environment';
     if (!['environment', 'pi-login'].includes(this.authMode)) throw new Error('Unknown auth mode');
     this.topology = options.topology ?? saved?.topology as Topology ?? 'coordinator';
@@ -89,7 +100,7 @@ export class Kernel {
     if (saved && this.scenario === 'intel' && saved.fixtureHash === hashData({ brief: legacyIntelBrief, sources: intelSources })) {
       fixtureHash = String(saved.fixtureHash);
     }
-    const config = { topology: this.topology, workerLabel: this.workerLabel, duplicateDelivery: this.duplicateDelivery,
+    const config = { ...(!saved || saved.maxConcurrentAgents !== undefined ? { maxConcurrentAgents: this.maxConcurrentAgents } : {}), ...(!saved || saved.features ? { features: this.features } : {}), topology: this.topology, workerLabel: this.workerLabel, duplicateDelivery: this.duplicateDelivery,
       timeoutMs: this.timeoutMs, maxAttempts: this.maxAttempts, maxContextChars: this.maxContextChars,
       fixtureHash, protocolVersion: 1,
       ...(this.scenario === 'intel' || saved?.scenario !== undefined ? { scenario: this.scenario } : {}),
@@ -99,7 +110,7 @@ export class Kernel {
       ...(this.pubsubVersion === 2 ? { pubsubVersion: 2 } : {}) };
     if (saved) {
       for (const [key, value] of Object.entries(config)) {
-        if (saved[key] !== value) throw new Error(`Resume configuration mismatch: ${key}`);
+        if (key === 'features' ? JSON.stringify(saved[key]) !== JSON.stringify(value) : saved[key] !== value) throw new Error(`Resume configuration mismatch: ${key}`);
       }
     } else {
       const fixture = this.makeArtifact('fixture', this.scenario === 'intel' ? intelBrief : sampleFixture, 'system', 'input');
@@ -127,6 +138,7 @@ export class Kernel {
   /** Commit the source, revision, and publication together. Repeating a source ID is idempotent. */
   injectIntelligence(value: unknown, topicId = 'intel-brief') {
     if (this.scenario !== 'intel' || !this.events.some(event => event.kind === 'board.started')) throw new Error('Start an intel pubsub board before adding intelligence');
+    if (!this.features.newIntelligence) throw new Error('New intelligence is disabled for this run');
     const update = validateIntelUpdate(value);
     const existing = this.artifacts.find(item => sourceId(item) === update.sourceId);
     if (existing) {
@@ -134,7 +146,9 @@ export class Kernel {
       return { revision: revisionOf(existing), artifactRef: existing.id, duplicate: true };
     }
     if (this.artifacts.filter(item => item.kind === 'intel-update').length >= maxIntelUpdates) throw new Error('Intelligence update budget exhausted (' + maxIntelUpdates + ')');
+    if (!this.features.sharedSubjects && !this.features.directMessages) throw new Error('No enabled channel can deliver new intelligence');
     const board = boardSnapshot(this.events);
+    if (!this.features.sharedSubjects && board.directMessages.length >= 64) throw new Error('Direct message budget exhausted (64)');
     if (!board.topics.some(topic => topic.id === topicId)) throw new Error('Unknown intelligence subject');
     if (board.updates.length >= 64) throw new Error('Board update budget exhausted (64)');
     const revision = this.revision + 1;
@@ -144,7 +158,8 @@ export class Kernel {
       changedClaims: update.claims.map(item => item.id), ...(previous ? { previousReportRef: previous.id } : {}) };
     this.journal.append(this.runId, [
       { kind: 'artifact', data: artifact }, { kind: 'intel.revision', data: assessment },
-      { kind: 'board.update', data: { id: 'intel-source-' + update.sourceId, topicId, author: 'user',
+      { kind: this.features.sharedSubjects ? 'board.update' : 'board.direct', data: { id: 'intel-source-' + update.sourceId,
+        ...(this.features.sharedSubjects ? { topicId, author: 'user' } : { from: 'user', to: 'analyst' }),
         text: 'New intelligence for assessment revision ' + revision + ': ' + update.title + '. Observed ' + update.observedAt +
           '. Source classification: ' + update.reliability + '. ' + update.observations,
         evidenceRefs: [artifact.id], createdAt: new Date().toISOString() } },
@@ -413,7 +428,7 @@ export class Kernel {
     if (this.currentTasks.some(task => task.status !== 'completed')) issues.push('Some tasks are incomplete');
     if (board && !board.settled) issues.push('The topic board has pending activity or has not settled with a published report');
     return { runId: this.runId, topology: this.topology, scenario: this.scenario, assessmentRevision: this.revision,
-      worker: this.workerLabel, success: evaluation.success && issues.length === 0, issues,
+      maxConcurrentAgents: this.maxConcurrentAgents, features: this.features, usage: usageReport(events, this.workerLabel), worker: this.workerLabel, success: evaluation.success && issues.length === 0, issues,
       metrics: { messages: events.filter(event => ['delivery', 'board.delivery'].includes(event.kind)).length,
         workerCalls, decisionCalls,
         subagentCalls,

@@ -274,10 +274,12 @@ async function createPiResponder<T extends { signal?: AbortSignal }>(
       }
       const text = message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('');
       const result = parseResult(text);
-      result.usage = messages.reduce((sum: {input: number; output: number}, current: any) => ({
+      result.usage = messages.reduce((sum: {input: number; output: number; cacheRead: number; cacheWrite: number}, current: any) => ({
         input: sum.input + (current.usage?.input ?? 0) + (current.usage?.cacheRead ?? 0) + (current.usage?.cacheWrite ?? 0),
         output: sum.output + (current.usage?.output ?? 0),
-      }), { input: 0, output: 0 });
+        cacheRead: sum.cacheRead + (current.usage?.cacheRead ?? 0),
+        cacheWrite: sum.cacheWrite + (current.usage?.cacheWrite ?? 0),
+      }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
       return result;
     } catch (error) {
       if (options.authMode === 'pi-login') {

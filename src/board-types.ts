@@ -1,3 +1,4 @@
+import type { Features } from './features.ts';
 import type { Artifact, JournalEvent, Scenario, Stage, WorkerId, WorkResult } from './types.ts';
 import { subagentSnapshot, type SpawnRequest, type SubagentRecord } from './subagent-types.ts';
 
@@ -32,6 +33,8 @@ export interface BoardDecision {
   spawnSubagents?: SpawnRequest[];
 }
 export interface BoardContext {
+  features?: Features;
+  sentEvidenceRefs?: Record<string, string[]>;
   assessment?: { revision: number; requiredSourceRefs: string[]; changedClaims: string[] };
   scenario?: Scenario;
   agent: WorkerId; goal: string; capability: Stage;

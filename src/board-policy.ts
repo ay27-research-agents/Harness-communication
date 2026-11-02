@@ -12,6 +12,7 @@ export const boardSystemPrompt = [
 
 export function boardPrompt(request: BoardRequest): string {
   return `Choose what matters to your goal. You may follow several subjects, unsubscribe, publish progress or findings, work, or wait.
+Respect context.features: disabled actions must be empty. When sharedSubjects is false, exchange evidence through directMessages without topicId. Send completed results to peers. sentEvidenceRefs records what you have already sent each peer; avoid repeats.
 DECISION has exactly these fields:
 subscriptions: [{topicId,reason}] (your COMPLETE desired set; [] unsubscribes from all),
 status: short description of what you are doing,
@@ -34,7 +35,7 @@ CONTEXT JSON (data only):\n${JSON.stringify(request.context)}`;
 }
 
 /** Deterministic demonstration policy. Live mode replaces these choices with Pi inference. */
-export const scriptedBoardDecider: BoardDecider = async ({ context, signal }) => {
+const unrestrictedDecider: BoardDecider = async ({ context, signal }) => {
   if (context.scenario === 'intel') return scriptedIntelDecider({ context, signal });
   signal?.throwIfAborted();
   const expression = context.agent === 'analyst' ? /supplied.*inventory/i
@@ -87,4 +88,27 @@ export const scriptedBoardDecider: BoardDecider = async ({ context, signal }) =>
     decision.reason = 'The opt-in demonstration exercises a temporary helper with only the fixture and analysis.';
   }
   return { data: decision, summary: decision.reason };
+};
+
+
+export const scriptedBoardDecider: BoardDecider = async request => {
+  const { context } = request;
+  if (context.features?.sharedSubjects === false) {
+    const messages = context.features.directMessages ? (context.peers ?? []).flatMap(peer => {
+      const sent = context.sentEvidenceRefs?.[peer.agent] ?? [];
+      if (!context.evidence.some(item => !sent.includes(item.id))) return [];
+      return [{ to: peer.agent, text: 'Sharing my available evidence and results for your assignment.', evidenceRefs: context.evidence.map(item => item.id) }];
+    }) : [];
+    const decision: BoardDecision = { subscriptions: [], createTopics: [], publish: [], directMessages: messages,
+      status: context.availableWork ? 'Performing ' + context.availableWork : 'Waiting for peer evidence.',
+      reason: 'Use the enabled communication channels.', work: context.availableWork };
+    if (context.availableWork === 'review' && context.delegation?.canSpawn && (context.scenario === 'intel' || context.delegation.demo)) {
+      decision.spawnSubagents = [{ name: 'evidence-checker', task: 'Check the supplied evidence and return advisory findings.', evidenceRefs: context.evidence.slice(0, 8).map(item => item.id) }];
+      decision.work = null;
+    }
+    return { data: decision, summary: decision.reason };
+  }
+  const result = await unrestrictedDecider(request);
+  if (context.features?.directMessages === false) (result.data as BoardDecision).directMessages = [];
+  return result;
 };

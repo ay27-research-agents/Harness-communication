@@ -52,6 +52,7 @@ export async function runSubagentTask(kernel: Kernel, task: SubagentTask, worker
   const saved = subagentSnapshot(kernel.events).find(item => item.id === task.id);
   if (!saved) {
     const records = subagentSnapshot(kernel.events);
+    if (!kernel.features.helpers) throw new Error('Helpers are disabled');
     if (records.length >= kernel.subagentLimit || records.some(item => item.parent === task.parent)) throw new Error('Subagent lifetime budget exhausted');
     if (!['analyst', 'reviewer', 'reporter'].includes(task.parent) || task.depth !== 1) throw new Error('Subagents cannot create subagents');
     kernel.record('subagent.requested', task);

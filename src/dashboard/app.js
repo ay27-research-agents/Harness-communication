@@ -1,5 +1,6 @@
 'use strict';
 const $ = id => document.getElementById(id);
+let concurrencyInitialized = false;
 let state, lastKey = '', polling = false;
 let token = location.hash.slice(1) || sessionStorage.getItem('harness-dashboard-token') || '';
 if (location.hash) {
@@ -46,7 +47,7 @@ async function refresh(force = false) {
     $('connection-dot').className = 'dot online';
     $('connection').textContent = next.closing ? 'Stopping' : next.busy ? 'Team working' : 'Connected';
     notice(next.error ? 'The harness needs attention: ' + next.error : '');
-    const key = [next.lastSequence, next.busy, next.error, next.closing, ...next.agents.map(agent => agent.phase)].join('|');
+    const key = [next.experiment?.status, next.experiment?.rows?.length, next.lastSequence, next.busy, next.error, next.closing, ...next.agents.map(agent => agent.phase)].join('|');
     if (force || key !== lastKey) { render(); lastKey = key; }
   } catch (error) {
     $('connection-dot').className = 'dot offline';
@@ -55,6 +56,7 @@ async function refresh(force = false) {
   } finally { polling = false; }
 }
 function render() {
+  renderExperiments();
   $('title').textContent = state.scenario === 'intel' ? 'Intelligence workspace' : 'Inventory workspace';
   $('subtitle').textContent = (state.scenario === 'intel' ? 'Intelligence in motion. Every source, conversation, and assessment.' : 'Follow the team from evidence to a reviewed report.') +
     '  ·  ' + state.worker;
@@ -79,7 +81,7 @@ function render() {
   options('topic', subjects, subjects.some(([id]) => id === 'intel-assessment') ? 'intel-assessment' : subjects[0]?.[0]);
   options('inject-topic', subjects, 'intel-brief');
   noteTargets();
-  $('inject-button').disabled = state.scenario !== 'intel' || state.counts.updates >= state.counts.maxUpdates || state.closing;
+  $('inject-button').disabled = state.features?.newIntelligence === false || state.scenario !== 'intel' || state.counts.updates >= state.counts.maxUpdates || state.closing;
   $('example').disabled = state.scenario !== 'intel';
   $('usage-note').textContent = state.worker.startsWith('pi:') ? 'Live model run. Adding a source or sending a note may use your model account.' :
     'Offline demonstration. Choices are scripted' + (state.worker === 'pi-faux' ? ' through the Pi SDK.' : '.') + ' No live model usage.';
@@ -228,7 +230,7 @@ async function submit(form, resultId, action, data, success) {
   button.disabled = true; result.className = 'form-result'; result.textContent = 'Sending…';
   try { const value = await api(action, data); result.textContent = success(value); await refresh(true); }
   catch (error) { result.className = 'form-result error'; result.textContent = error.message; }
-  finally { button.disabled = state?.closing || (action === 'inject' && state?.counts.updates >= state?.counts.maxUpdates); }
+  finally { button.disabled = state?.closing || state?.experiment?.status === 'running' || (action === 'experiment' && state?.busy) || (action === 'inject' && (state?.features?.newIntelligence === false || state?.counts.updates >= state?.counts.maxUpdates)); }
 }
 $('refresh').addEventListener('click', () => refresh(true));
 $('revision').addEventListener('change', renderAssessment);
@@ -257,3 +259,40 @@ $('note-form').addEventListener('submit', async event => {
 });
 refresh();
 setInterval(() => refresh(), 2000);
+
+
+function renderExperiments() {
+  $('feature-summary').textContent = 'Current team: ' + Object.entries(state.features || {}).map(([key,value]) => ({directMessages:'Direct messages',sharedSubjects:'Shared subjects',helpers:'Helpers',newIntelligence:'New intelligence'}[key] || key) + ' ' + (value ? 'on' : 'off')).join(' · ');
+  $('feature-summary').textContent += ' · Maximum active agents: ' + (state.maxConcurrentAgents || 1);
+  if (!concurrencyInitialized) { $('experiment-concurrency').value = String(state.maxConcurrentAgents || 1); concurrencyInitialized = true; }
+  const usage = state.usage, root = $('usage-summary'); root.replaceChildren();
+  if (usage) {
+    root.append(make('p', '', usage.measurement + ' · Input: ' + usage.total.input + ' · Output: ' + usage.total.output + ' · Missing usage: ' + usage.total.missingUsage));
+    for (const [agent,row] of Object.entries(usage.byAgent)) root.append(make('p', 'caption', agent + ': ' + row.input + ' input / ' + row.output + ' output / ' + row.calls + ' calls'));
+    for (const [activity,row] of Object.entries(usage.byActivity)) root.append(make('p', 'caption', activity + ': ' + row.input + ' input / ' + row.output + ' output'));
+    root.append(make('p', 'caption', 'Cache reads/writes are included in input totals: ' + (usage.cacheBreakdownAvailable ? usage.total.cacheRead + ' / ' + usage.total.cacheWrite : 'breakdown unavailable')));
+  }
+  const job = state.experiment, result = $('benchmark-results'); result.replaceChildren();
+  $('experiment-form').querySelector('button').disabled = state.busy || job?.status === 'running' || state.closing;
+  if (!job) return;
+  result.append(make('p', 'caption', 'Worker: ' + (job.worker || state.worker) + ' · Usage: ' + (job.rows?.[0]?.report?.usage?.measurement || state.usage?.measurement || 'unavailable')));
+  result.append(make('p', '', 'Experiment: ' + job.status + ' · Active agent limit: ' + (job.maxConcurrentAgents || 1) + (job.error ? ' — ' + job.error : '')));
+  const table = make('table', 'claims'), head = make('tr');
+  for (const label of ['Configuration','Success','Mean tokens','Median time','Missing usage']) head.append(make('th','',label));
+  table.append(head);
+  for (const row of job.summary || []) {
+    const tr = make('tr');
+    for (const value of [row.configuration,row.successes + '/' + row.runs,row.meanTokens.toFixed(0),(row.medianMs / 1000).toFixed(1) + 's',row.missingUsage]) tr.append(make('td','',String(value)));
+    table.append(tr);
+  }
+  result.append(table);
+  if (job.directory) result.append(make('p', 'caption', 'Saved results.json, results.csv and runs.sqlite in ' + job.directory));
+}
+$('experiment-form').addEventListener('submit', async event => {
+  event.preventDefault();
+  await submit(event.target, 'experiment-result', 'experiment', {
+    maxConcurrentAgents: Number($('experiment-concurrency').value), mode: $('experiment-mode').value, repeats: Number($('experiment-repeats').value),
+    features: { directMessages: $('feature-direct').checked, sharedSubjects: $('feature-subjects').checked,
+      helpers: $('feature-helpers').checked, newIntelligence: $('feature-intelligence').checked }
+  }, () => 'Experiment started. Results will appear here.');
+});

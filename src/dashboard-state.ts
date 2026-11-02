@@ -1,3 +1,5 @@
+import { features } from './features.ts';
+import { usageReport } from './usage.ts';
 import type { Artifact, JournalEvent, TaskRecord } from './types.ts';
 import { agentIds, boardSnapshot } from './board-types.ts';
 import { currentRevision, revisionOf, maxIntelUpdates, backupTestExample } from './intel-updates.ts';
@@ -55,6 +57,7 @@ export function dashboardState(events: JournalEvent[], runtime: {
     if (activity) timeline.push({ seq: event.seq, at: event.at, ...activity });
   }
   return {
+    maxConcurrentAgents: Number(config?.maxConcurrentAgents ?? 1), features: features(config?.features), usage: usageReport(events, String(config?.workerLabel ?? 'scripted')),
     runId: runtime.runId, scenario: String(config?.scenario ?? 'inventory'), worker: String(config?.workerLabel ?? 'unknown'),
     busy: runtime.busy, error: runtime.error, closing: runtime.closing, settled: board.settled, revision,
     lastSequence: events.at(-1)?.seq ?? 0, agents, assessments, example: backupTestExample,

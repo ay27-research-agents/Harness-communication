@@ -5,7 +5,7 @@ import type { AddressInfo } from 'node:net';
 
 export async function startDashboard(options: {
   snapshot: () => unknown;
-  act: (action: 'inject' | 'post' | 'dm', data: any) => unknown | Promise<unknown>;
+  act: (action: 'inject' | 'post' | 'dm' | 'experiment', data: any) => unknown | Promise<unknown>;
 }) {
   const token = randomBytes(32).toString('hex');
   const assets = new Map([
@@ -38,7 +38,7 @@ export async function startDashboard(options: {
       return;
     }
     const action = request.url?.slice('/api/'.length);
-    if (!request.url?.startsWith('/api/') || !['inject', 'post', 'dm'].includes(action ?? '') || request.method !== 'POST') {
+    if (!request.url?.startsWith('/api/') || !['inject', 'post', 'dm', 'experiment'].includes(action ?? '') || request.method !== 'POST') {
       send(response, 404, { error: 'Unknown endpoint' }); return;
     }
     if (request.headers.origin !== origin || !request.headers['content-type']?.startsWith('application/json')) {
@@ -58,7 +58,7 @@ export async function startDashboard(options: {
       if (tooLarge) { request.resume(); send(response, 413, { error: 'Request exceeds 32 KiB' }); return; }
       const data = JSON.parse(Buffer.concat(chunks).toString('utf8'));
       if (!data || typeof data !== 'object' || Array.isArray(data)) throw new Error('Expected a JSON object');
-      send(response, 200, await options.act(action as 'inject' | 'post' | 'dm', data));
+      send(response, 200, await options.act(action as 'inject' | 'post' | 'dm' | 'experiment', data));
     } catch (error) { if (!response.writableEnded) send(response, 400, { error: error instanceof Error ? error.message : 'Request failed' }); }
   });
   server.requestTimeout = 10000;

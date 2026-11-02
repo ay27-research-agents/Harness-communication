@@ -6,6 +6,8 @@ The implementation runs under Node 24 without installing project dependencies. I
 
 ## Try it
 
+**New: feature controls and benchmarks.** Turn direct messages, shared subjects, helpers, and added intelligence on or off for new pub/sub runs. Use the dashboard's **Experiments and usage** panel or run `.\harness.ps1 benchmark --worker scripted --repeats 1` to compare four communication configurations. Reports include token usage by agent/activity, cache counts, missing usage, success, and timing, with JSON/CSV output. See [the experiment guide](EXPERIMENTS.md) for live Pi commands and measurement limits.
+
 **New: live intelligence updates and dashboard.** Start `.\harness.ps1 serve --scenario intel --dashboard --worker scripted --db runs\intel-dashboard.sqlite`, open its printed browser link, and load the backup-test example. Agents produce a new assessment while preserving the original. Inspect subjects, private messages, helpers, and changed claims in one place. See [the dashboard walkthrough](DASHBOARD.md) for Pi modes, source injection, history, and stopping.
 
 **New: intelligence exercise.** Try `.\harness.ps1 run pubsub --scenario intel --trace --db runs\intel-demo.sqlite` for a finite offline demonstration. Three agents exchange different source packets, resolve contradictory intelligence, request a chronology specialist, and produce a constrained assessment. See [the intelligence demo](INTEL-DEMO.md) for separate-process Pi runs, your saved login, interaction commands, and the expected result. Inventory remains the default for every topology.
