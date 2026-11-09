@@ -20,6 +20,8 @@ const topologies: Topology[] = ['coordinator', 'pubsub', 'routed', 'handoff'];
 const help = `Pi Communication Lab — synthetic inventory and intelligence experiments
 
 node src/cli.ts benchmark [--worker scripted|pi-faux|pi] [--repeats N] [--output DIRECTORY]
+node src/cli.ts cancel RUN_ID --db PATH --text REASON
+node src/cli.ts access RUN_ID --db PATH --topic SUBJECT --readers analyst,reviewer --writers reviewer
 node src/cli.ts doctor
 node src/cli.ts login-models [--pi-package PATH]
 node src/cli.ts compare [--worker scripted|pi-faux|pi] [--duplicates]
@@ -94,7 +96,7 @@ function summary(report: ReturnType<Kernel['report']>) {
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
     'max-concurrent-agents': {type:'string'}, 'no-direct': {type:'boolean'}, 'no-subjects': {type:'boolean'}, 'no-helpers': {type:'boolean'}, 'no-intelligence': {type:'boolean'}, repeats: {type:'string'},
-    db: { type: 'string' }, worker: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, auth: { type: 'string' }, scenario: { type: 'string' },
+    'require-approval': {type:'boolean'}, stage: {type:'string'}, 'task-id': {type:'string'}, 'message-type': {type:'string'}, 'expires-at': {type:'string'}, readers: {type:'string'}, writers: {type:'string'}, db: { type: 'string' }, worker: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, auth: { type: 'string' }, scenario: { type: 'string' },
     'pi-package': { type: 'string' }, duplicates: { type: 'boolean' }, 'fail-once': { type: 'string' },
     timeout: { type: 'string' }, 'max-attempts': { type: 'string' }, output: { type: 'string' },
     'max-subagents': { type: 'string' }, 'subagent-demo': { type: 'boolean' },
@@ -104,7 +106,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   } });
   const command = positionals[0] ?? 'help';
   if (values.help || command === 'help') { console.log(help); return; }
-  if (!['benchmark', 'doctor', 'login-models', 'compare', 'run', 'list', 'inspect', 'resume', 'export', 'board', 'post', 'serve', 'status', 'stop', 'dm', 'inject'].includes(command)) throw new Error(`Unknown command: ${command}`);
+  if (!['require-approval', 'authorize', 'cancel', 'access', 'benchmark', 'doctor', 'login-models', 'compare', 'run', 'list', 'inspect', 'resume', 'export', 'board', 'post', 'serve', 'status', 'stop', 'dm', 'inject'].includes(command)) throw new Error(`Unknown command: ${command}`);
   const maxConcurrentAgents = numberOption(values['max-concurrent-agents'], '--max-concurrent-agents');
   if (maxConcurrentAgents !== undefined && (!Number.isInteger(maxConcurrentAgents) || maxConcurrentAgents < 1 || maxConcurrentAgents > 3)) throw new Error('--max-concurrent-agents must be 1..3');
   if (maxConcurrentAgents !== undefined && !['run','serve','resume','benchmark'].includes(command)) throw new Error('--max-concurrent-agents requires pubsub run, serve, resume, or benchmark');
@@ -171,7 +173,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const boardDirectory = (runId: string) => resolve(dirname(dbPath), 'boards', runId);
   if (command === 'serve') {
     if (values.duplicates || failStage) throw new Error('Fault injection is available in run/compare, not serve');
-    const runtime = await startRuntime({ maxConcurrentAgents, features: selectedFeatures, db: dbPath, runId: positionals[1], timeoutMs, maxAttempts, subagentLimit, subagentDemo: values['subagent-demo'], scenario, dashboard: values.dashboard,
+    const runtime = await startRuntime({ requireApproval: values['require-approval'], maxConcurrentAgents, features: selectedFeatures, db: dbPath, runId: positionals[1], timeoutMs, maxAttempts, subagentLimit, subagentDemo: values['subagent-demo'], scenario, dashboard: values.dashboard,
       worker: { mode: (values.worker ?? 'scripted') as WorkerMode, provider: values.provider, model: values.model, authMode: values.auth as 'environment' | 'pi-login' | undefined,
         packagePath: values['pi-package'], timeoutMs }, trace: values.trace ? line => console.log(line) : undefined });
     console.log(`Service ready. Run: ${runtime.runId}\nJournal: ${dbPath}\nShared workspace: ${boardDirectory(runtime.runId)}\nUse a second terminal for post, dm, status or stop. Ctrl+C also stops the service.`);
@@ -183,11 +185,11 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     return;
   }
   if (['status', 'stop'].includes(command) || readRuntime(dbPath)) {
-    if (!['status', 'stop', 'board', 'post', 'dm', 'resume', 'inspect', 'export', 'list', 'inject'].includes(command)) {
+    if (!['require-approval', 'authorize', 'cancel', 'access', 'status', 'stop', 'board', 'post', 'dm', 'resume', 'inspect', 'export', 'list', 'inject'].includes(command)) {
       throw new Error('This database has a running service. Stop it first or choose a different --db.');
     }
     const result = await runtimeCommand(dbPath, command, { runId: positionals[1], json: values.json,
-      maxConcurrentAgents, features: selectedFeatures, topic: values.topic, text: values.text, title: values.title, description: values.description, to: values.to, scenario, source: intelligence });
+      stage: values.stage, taskId: values['task-id'], maxConcurrentAgents, metadata: {messageType: values['message-type'], expiresAt: values['expires-at']}, readers: values.readers?.split(',').filter(Boolean) ?? [], writers: values.writers?.split(',').filter(Boolean) ?? [], features: selectedFeatures, topic: values.topic, text: values.text, title: values.title, description: values.description, to: values.to, scenario, source: intelligence });
     if (command === 'export') {
       const path = resolve(values.output ?? `runs/${positionals[1]}.json`);
       mkdirSync(dirname(path), { recursive: true });
@@ -196,6 +198,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
     } else console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
     return;
   }
+  if (['require-approval','authorize','cancel','access'].includes(command)) throw new Error('This command requires the running service for the selected database');
+  if (values['message-type'] || values['expires-at']) throw new Error('Typed operator messages require an active service');
   const journal = new SqliteJournal(dbPath);
   try {
     if (command === 'list') {
@@ -288,7 +292,7 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         }
         return workerSpec.worker(request);
       } : workerSpec.worker;
-      kernel = new Kernel({ maxConcurrentAgents, features: selectedFeatures, journal, topology, runId: savedId, worker, workerLabel: workerSpec.label, authMode,
+      kernel = new Kernel({ requireApproval: values['require-approval'], maxConcurrentAgents, features: selectedFeatures, journal, topology, runId: savedId, worker, workerLabel: workerSpec.label, authMode,
         subagentLimit, subagentDemo: values['subagent-demo'], scenario,
         duplicateDelivery: values.duplicates, timeoutMs, maxAttempts });
       try {

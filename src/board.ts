@@ -1,3 +1,5 @@
+import type { MessageMetadata } from './operation.ts';
+import { assertOperationActive, canAccess, fresh, messageMetadata } from './operation.ts';
 import { createHash, randomUUID } from 'node:crypto';
 import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname, join, resolve } from 'node:path';
@@ -49,7 +51,7 @@ export function validateDecision(value: unknown, context: BoardContext): BoardDe
   if (context.features?.directMessages === false && array(item.directMessages ?? [], 2).length) throw new Error('Direct messages are disabled');
   if (context.features?.helpers === false && array(item.spawnSubagents ?? [], 1).length) throw new Error('Helpers are disabled');
   const allowed = ['subscriptions', 'status', 'reason', 'createTopics', 'publish', 'work'];
-  if (Object.keys(item).some(key => ![...allowed, 'directMessages', 'spawnSubagents'].includes(key)) || allowed.some(key => !Object.hasOwn(item, key))) throw new Error('Board decision has missing or unknown fields');
+  if (Object.keys(item).some(key => ![...allowed, 'directMessages', 'spawnSubagents', 'readEvidenceRefs'].includes(key)) || allowed.some(key => !Object.hasOwn(item, key))) throw new Error('Board decision has missing or unknown fields');
   const createTopics = array(item.createTopics, 2).map(validateTopic);
   const topicIds = new Set(context.catalog.map(topic => topic.id));
   for (const topic of createTopics) {
@@ -97,7 +99,9 @@ export function validateDecision(value: unknown, context: BoardContext): BoardDe
     if (new Set(evidenceRefs).size !== evidenceRefs.length || evidenceRefs.some(ref => !known.has(ref))) throw new Error('Subagent received unavailable evidence');
     return { name, task: textValue(spawn.task, 2000), evidenceRefs };
   });
-  return { subscriptions, status: textValue(item.status, 500), reason: textValue(item.reason, 1500),
+  const readEvidenceRefs = array(item.readEvidenceRefs ?? [], 2).map(ref => textValue(ref, 250));
+  if (readEvidenceRefs.some(ref => !known.has(ref))) throw new Error('Requested unavailable evidence');
+  return { readEvidenceRefs, subscriptions, status: textValue(item.status, 500), reason: textValue(item.reason, 1500),
     createTopics, publish, work: item.work as Stage | null, directMessages, spawnSubagents };
 }
 
@@ -154,10 +158,11 @@ export class TopicBoard {
   }
   private prepare(agent: WorkerId): Omit<Turn, 'id'> | undefined {
     const state = this.state(agent);
-    const { topics, updates } = this.snapshot;
+    const { updates } = this.snapshot;
+    const topics = this.snapshot.topics.filter(topic => canAccess(this.kernel, topic.id, agent, 'readers'));
     const followed = new Set(this.kernel.features.sharedSubjects ? state.subscriptions.map(sub => sub.topicId) : []);
     const unread = this.kernel.events.filter(event => event.kind === 'board.update' &&
-      followed.has((event.data as BoardUpdate).topicId) && (event.data as BoardUpdate).author !== agent &&
+      followed.has((event.data as BoardUpdate).topicId) && canAccess(this.kernel, (event.data as BoardUpdate).topicId, agent, 'readers') && fresh(event.data as BoardUpdate) && (event.data as BoardUpdate).author !== agent &&
       event.seq > (state.cursors[(event.data as BoardUpdate).topicId] ?? 0));
     const messages = this.snapshot.directMessages;
     const directUnread = this.kernel.events.filter(event => event.kind === 'board.direct.received' &&
@@ -167,19 +172,19 @@ export class TopicBoard {
     const seenOwn = digest(ownWork.map(item => item.id));
     const subagents = this.snapshot.subagents.filter(item => item.parent === agent);
     const seenSubagents = digest(subagents);
-    if ((state.seenRevision ?? 1) === this.kernel.revision && state.seenCatalog === seenCatalog && state.seenOwn === seenOwn && (state.seenSubagents ?? digest([])) === seenSubagents && !unread.length && !directUnread.length) return undefined;
+    if ((state.seenRevision ?? 1) === this.kernel.revision && state.seenCatalog === seenCatalog && state.seenOwn === seenOwn && (state.seenSubagents ?? digest([])) === seenSubagents && !unread.length && !directUnread.length && !state.readEvidenceRefs?.length) return undefined;
     let selected = unread.slice(0, 4);
     let directSelected = directUnread.slice(0, 2);
     for (;;) {
       const inbox = selected.map(event => event.data as BoardUpdate);
-      const directInbox = directSelected.map(event => messages.find(message => message.id === (event.data as { id: string }).id)!);
+      const directInbox = directSelected.map(event => messages.find(message => message.id === (event.data as { id: string }).id)!).filter(fresh);
       const refs = new Set([...state.knownRefs, ...ownWork.map(item => item.id), ...inbox.flatMap(post => post.evidenceRefs), ...directInbox.flatMap(message => message.evidenceRefs)]);
       const evidence = this.kernel.currentArtifacts.filter(artifact => refs.has(artifact.id));
       const profiles = this.kernel.scenario === 'intel' ? intelProfiles : agentProfiles;
       const { capability, goal } = profiles[agent];
       const ready = !ownWork.length && (this.kernel.scenario === 'intel' ? Boolean(intelInputs(capability, evidence, this.kernel.assessment.sourceRefs)) : requiredKinds[capability].every(kind => evidence.some(item => item.kind === kind))) &&
         (capability !== 'report' || evidence.some(item => item.kind === 'review' && (item.data as { approved: boolean }).approved));
-      const context: BoardContext = { agent, goal, capability, catalog: this.kernel.features.sharedSubjects ? topics : [], subscriptions: state.subscriptions,
+      const context: BoardContext = { readEvidenceRefs: state.readEvidenceRefs ?? [], agent, goal, capability, catalog: this.kernel.features.sharedSubjects ? topics : [], subscriptions: state.subscriptions.filter(sub => canAccess(this.kernel, sub.topicId, agent, 'readers')),
         features: this.kernel.features,
         sentEvidenceRefs: Object.fromEntries(agentIds.filter(id => id !== agent).map(id => [id, [...new Set(messages.filter(m => m.from === agent && m.to === id).flatMap(m => m.evidenceRefs))]])),
         ...(this.kernel.scenario === 'intel' ? { scenario: 'intel' as const,
@@ -191,7 +196,7 @@ export class TopicBoard {
         subagents,
         delegation: { canSpawn: this.kernel.features.helpers && !subagents.length && this.snapshot.subagents.length < this.kernel.subagentLimit,
           remaining: Math.max(0, this.kernel.subagentLimit - this.snapshot.subagents.length), maxDepth: 1, maxPerParent: 1, demo: this.kernel.subagentDemo },
-        peers: agentIds.filter(id => id !== agent).map(id => ({ agent: id, goal: profiles[id].goal, subscriptions: this.state(id).subscriptions })),
+        peers: agentIds.filter(id => id !== agent).map(id => ({ agent: id, goal: profiles[id].goal, subscriptions: this.state(id).subscriptions.filter(sub => canAccess(this.kernel, sub.topicId, agent, 'readers')) })),
         publishedEvidenceRefs: [...new Set(updates.filter(post => post.author === agent).flatMap(post => post.evidenceRefs))]
           .filter(ref => evidence.some(item => item.id === ref)) };
       if (JSON.stringify(context).length <= this.kernel.maxContextChars) {
@@ -278,6 +283,8 @@ export class TopicBoard {
     this.append([{ kind: 'board.topic', data: topic }]);
   }
   private publish(update: BoardUpdate): void {
+    assertOperationActive(this.kernel);
+    if (!canAccess(this.kernel, update.topicId, update.author, 'writers')) throw new Error('Subject write access denied');
     const existing = this.snapshot.updates.find(item => item.id === update.id);
     if (existing) {
       if (existing.topicId !== update.topicId || existing.author !== update.author || existing.text !== update.text || JSON.stringify(existing.evidenceRefs) !== JSON.stringify(update.evidenceRefs)) throw new Error('Conflicting publication ID');
@@ -285,10 +292,12 @@ export class TopicBoard {
     }
     if (!this.snapshot.topics.some(topic => topic.id === update.topicId)) throw new Error('Unknown publication topic');
     if (this.snapshot.updates.length >= 64) throw new Error('Board update budget exhausted (64)');
-    this.append([{ kind: 'board.update', data: update }]);
+    this.append([{ kind: 'board.update', data: { ...update, ...messageMetadata(this.kernel, update) } }]);
     this.trace(`${update.author} published to ${update.topicId}: ${update.text.slice(0, 160)}`);
   }
   private async apply(turn: Turn, decision: BoardDecision): Promise<void> {
+    assertOperationActive(this.kernel);
+    for (const sub of decision.subscriptions) if (!decision.createTopics.some(topic => topic.id === sub.topicId) && !canAccess(this.kernel, sub.topicId, turn.agent, 'readers')) throw new Error('Subject read access denied');
     const previous = this.state(turn.agent);
     this.trace(`${turn.agent}: ${decision.status} Reason: ${decision.reason}`);
     for (const sub of decision.subscriptions) if (!previous.subscriptions.some(item => item.topicId === sub.topicId)) this.trace(`${turn.agent} subscribed to ${sub.topicId}: ${sub.reason}`);
@@ -321,7 +330,7 @@ export class TopicBoard {
       this.trace(`${turn.agent} chose to perform ${stage}.`);
       await this.kernel.execute(stage, taskId, turn.agent, inputs);
     }
-    const state: AgentState = { agent: turn.agent, subscriptions: decision.subscriptions, status: decision.status,
+    const state: AgentState = { readEvidenceRefs: decision.readEvidenceRefs ?? [], agent: turn.agent, subscriptions: decision.subscriptions, status: decision.status,
       cursors: turn.cursors, knownRefs: turn.context.evidence.map(item => item.id),
       seenCatalog: turn.seenCatalog, seenOwn: turn.seenOwn, seenSubagents: turn.seenSubagents, turnId: turn.id, directCursor: turn.directCursor ?? 0 };
     if (this.kernel.scenario === 'intel') state.seenRevision = turn.context.assessment?.revision ?? 1;
@@ -368,6 +377,7 @@ export class TopicBoard {
     }
   }
   async run(): Promise<void> {
+    assertOperationActive(this.kernel);
     this.options.signal?.throwIfAborted();
     this.initialize();
     await this.flushDirect();
@@ -396,13 +406,14 @@ export class TopicBoard {
       return;
     }
   }
-  post(topicId: string, text: string, descriptor?: Topic): BoardUpdate {
+  post(topicId: string, text: string, descriptor?: Topic, metadata: Partial<MessageMetadata> = {}): BoardUpdate {
+    assertOperationActive(this.kernel);
     if (!this.kernel.events.some(event => event.kind === 'board.started')) throw new Error('Start the pub/sub run before posting');
     if (!this.kernel.features.sharedSubjects) throw new Error('Shared subjects are disabled');
     textValue(text, 6000);
     if (this.snapshot.updates.length >= 64) throw new Error('Board update budget exhausted (64)');
     if (descriptor) this.ensureTopic(validateTopic(descriptor));
-    const update: BoardUpdate = { id: `user-${randomUUID()}`, author: 'user', topicId,
+    const update: BoardUpdate = { ...messageMetadata(this.kernel, metadata), id: `user-${randomUUID()}`, author: 'user', topicId,
       text: textValue(text, 6000), evidenceRefs: [], createdAt: new Date().toISOString() };
     this.publish(update);
     this.materialize();
@@ -418,19 +429,21 @@ export class TopicBoard {
     if (this.options.directory) writeBoardFiles(this.kernel.events, this.options.directory, this.kernel.runId);
   }
   private saveDirect(message: DirectMessage): void {
+    assertOperationActive(this.kernel);
+    if (message.topicId && (!canAccess(this.kernel, message.topicId, message.from, 'readers') || !canAccess(this.kernel, message.topicId, message.to, 'readers'))) throw new Error('Private subject reference denied');
     const existing = this.snapshot.directMessages.find(item => item.id === message.id);
     if (existing) {
-      if (digest({ ...existing, createdAt: '' }) !== digest({ ...message, createdAt: '' })) throw new Error('Conflicting direct message ID');
+      if (digest({ ...existing, createdAt: '' }) !== digest({ ...existing, ...message, createdAt: '' })) throw new Error('Conflicting direct message ID');
       return;
     }
     if (this.snapshot.directMessages.length >= 64) throw new Error('Direct message budget exhausted (64)');
-    this.append([{ kind: 'board.direct', data: message }]);
+    this.append([{ kind: 'board.direct', data: { ...message, ...messageMetadata(this.kernel, message) } }]);
     this.trace(`${message.from} messaged ${message.to}${message.topicId ? ' about ' + message.topicId : ''}: ${message.text.slice(0, 120)}`);
   }
   /** A durable transport receipt is separate from the recipient's processed receipt. */
   receiveDirect(message: DirectMessage, transport: Record<string, unknown> = { mode: 'inline' }): void {
     const saved = this.snapshot.directMessages.find(item => item.id === message.id);
-    if (!saved || digest(saved) !== digest(message)) throw new Error('Message does not match committed outbox');
+    if (!saved || (message.operationId !== undefined && message.operationId !== this.kernel.runId) || digest(saved) !== digest(message)) throw new Error('Message does not match committed outbox');
     if (!this.kernel.events.some(event => event.kind === 'board.direct.received' && (event.data as { id: string }).id === message.id)) {
       this.append([{ kind: 'board.direct.received', data: { id: message.id, to: message.to, ...transport } }]);
     }
@@ -443,19 +456,23 @@ export class TopicBoard {
   private async flushDirectUnlocked(): Promise<void> {
     for (const message of this.snapshot.directMessages) {
       if (this.kernel.events.some(event => event.kind === 'board.direct.received' && (event.data as { id: string }).id === message.id)) continue;
+      if (!fresh(message)) {
+        this.append([{kind:'board.direct.received',data:{id:message.id,to:message.to,status:'expired'}}]);
+        continue;
+      }
       if (this.options.sendDirect) await this.options.sendDirect(message);
       else this.receiveDirect(message);
     }
   }
-  direct(to: WorkerId, text: string, topicId?: string): DirectMessage {
+  direct(to: WorkerId, text: string, topicId?: string, metadata: Partial<MessageMetadata> = {}): DirectMessage {
     if (!this.kernel.features.directMessages) throw new Error('Direct messages are disabled');
     if (!agentIds.includes(to)) throw new Error('Unknown direct message recipient');
     if (topicId && !this.snapshot.topics.some(topic => topic.id === topicId)) throw new Error('Unknown direct message topic');
-    const message: DirectMessage = { id: `user-${randomUUID()}`, from: 'user', to,
+    const message: DirectMessage = { ...messageMetadata(this.kernel, metadata), id: `user-${randomUUID()}`, from: 'user', to,
       text: textValue(text, 6000), evidenceRefs: [], createdAt: new Date().toISOString(), ...(topicId ? { topicId } : {}) };
     this.saveDirect(message);
     this.materialize();
-    return message;
+    return this.snapshot.directMessages.find(item => item.id === message.id)!;
   }
 }
 

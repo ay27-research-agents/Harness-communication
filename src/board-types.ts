@@ -1,3 +1,4 @@
+import type { MessageMetadata } from './operation.ts';
 import type { Features } from './features.ts';
 import type { Artifact, JournalEvent, Scenario, Stage, WorkerId, WorkResult } from './types.ts';
 import { subagentSnapshot, type SpawnRequest, type SubagentRecord } from './subagent-types.ts';
@@ -7,14 +8,15 @@ export interface Subscription { topicId: string; reason: string }
 export interface DirectPost {
   to: WorkerId; topicId?: string; text: string; evidenceRefs: string[]; replyTo?: string;
 }
-export interface DirectMessage extends DirectPost {
+export interface DirectMessage extends DirectPost, Partial<MessageMetadata> {
   id: string; from: WorkerId | 'user'; createdAt: string;
 }
-export interface BoardUpdate {
+export interface BoardUpdate extends Partial<MessageMetadata> {
   id: string; topicId: string; author: WorkerId | 'system' | 'user';
   text: string; evidenceRefs: string[]; createdAt: string;
 }
 export interface AgentState {
+  readEvidenceRefs?: string[];
   seenRevision?: number;
   agent: WorkerId; subscriptions: Subscription[]; status: string;
   cursors: Record<string, number>; knownRefs: string[];
@@ -23,6 +25,7 @@ export interface AgentState {
   seenSubagents?: string;
 }
 export interface BoardDecision {
+  readEvidenceRefs?: string[];
   subscriptions: Subscription[];
   status: string;
   reason: string;
@@ -33,6 +36,7 @@ export interface BoardDecision {
   spawnSubagents?: SpawnRequest[];
 }
 export interface BoardContext {
+  readEvidenceRefs?: string[];
   features?: Features;
   sentEvidenceRefs?: Record<string, string[]>;
   assessment?: { revision: number; requiredSourceRefs: string[]; changedClaims: string[] };
@@ -72,6 +76,12 @@ export function boardSnapshot(events: JournalEvent[]) {
   const settled = events.findLast(e => e.kind === 'board.settled');
   const activity = events.findLast(e => (e.kind.startsWith('board.') || e.kind.startsWith('subagent.') && !e.kind.startsWith('subagent.process.')) && e.kind !== 'board.settled');
   const directMessages = events.filter(e => e.kind === 'board.direct').map(e => e.data as DirectMessage);
-  return { topics, updates, directMessages, subagents: subagentSnapshot(events), agents: [...agents.values()], decisions,
+  const deliveryStatus = directMessages.map(message => {
+    const received = events.find(event => event.kind === 'board.direct.received' && (event.data as any).id === message.id);
+    const processed = events.some(event => event.kind === 'receipt' && (event.data as any).key === 'direct:' + message.to + ':' + message.id);
+    return {id:message.id,operationId:message.operationId,
+      state:(received?.data as any)?.status === 'expired' ? 'expired' : processed ? 'processed' : received ? 'received' : 'queued'};
+  });
+  return { topics, updates, directMessages, deliveryStatus, subagents: subagentSnapshot(events), agents: [...agents.values()], decisions,
     settled: Boolean(settled && (!activity || settled.seq > activity.seq)) };
 }

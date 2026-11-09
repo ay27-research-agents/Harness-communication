@@ -1,3 +1,4 @@
+import { setTopicAccess, authorizeWork, assertOperationActive } from './operation.ts';
 import { runBenchmark } from './benchmark.ts';
 import { features as parseFeatures } from './features.ts';
 import type { Features } from './features.ts';
@@ -40,7 +41,7 @@ export async function runtimeCommand(db: string, method: string, data: unknown =
 
 export async function startRuntime(options: {
   db: string; runId?: string; worker?: WorkerConfig; timeoutMs?: number; maxAttempts?: number; trace?: (line: string) => void;
-  maxConcurrentAgents?: number; subagentLimit?: number; subagentDemo?: boolean; scenario?: Scenario; dashboard?: boolean; features?: Partial<Features>;
+  requireApproval?: boolean; maxConcurrentAgents?: number; subagentLimit?: number; subagentDemo?: boolean; scenario?: Scenario; dashboard?: boolean; features?: Partial<Features>;
 }) {
   const db = resolve(options.db);
   if (readRuntime(db)) throw new Error('A service is already running for this database');
@@ -99,12 +100,12 @@ export async function startRuntime(options: {
       return result;
     }
     if (action === 'dm') {
-      const message = board.direct(data.to, data.text, data.topic); wake(); return message;
+      const message = board.direct(data.to, data.text, data.topic, data.metadata); wake(); return message;
     }
     const { topic, text, title, description } = data;
     const exists = board.snapshot.topics.some(item => item.id === topic);
     if (!exists && (!title || !description)) throw new Error('A new topic requires --title and --description');
-    const update = board.post(topic, text, exists ? undefined : { id: topic, title, description }); wake(); return update;
+    const update = board.post(topic, text, exists ? undefined : { id: topic, title, description }, data.metadata); wake(); return update;
   };
   const server = await listenRpc(async request => {
     if (request.method === 'received') {
@@ -120,6 +121,25 @@ export async function startRuntime(options: {
     if (closing) throw new Error('Runtime is closing');
     if (request.data?.runId && request.data.runId !== kernel.runId) throw new Error('Run ID does not match active service');
     switch (request.method) {
+      case 'require-approval':
+        assertOperationActive(kernel);
+        if (busy) throw new Error('Enable approval requirements while the team is idle');
+        if (!kernel.events.some(event => event.kind === 'operation.approval-required')) kernel.record('operation.approval-required',{operationId:kernel.runId});
+        return {approvalRequired:true};
+      case 'authorize':
+        authorizeWork(kernel,request.data.taskId,request.data.to,request.data.stage,request.data.metadata?.expiresAt);
+        return {authorized:true};
+      case 'cancel':
+        if (!kernel.events.some(event => event.kind === 'operation.cancelled')) kernel.record('operation.cancelled', {operationId:kernel.runId,reason:request.data?.text ?? 'Operator cancellation'});
+        lifetime.abort();
+        await pump;
+        await subagentFlight.catch(() => {});
+        kernel.record('operation.cancellation-acknowledged',{operationId:kernel.runId});
+        return {cancelled:true,runId:kernel.runId};
+      case 'access':
+        if (busy) throw new Error('Change subject access while the team is idle');
+        setTopicAccess(kernel,request.data.topic,request.data.readers,request.data.writers);
+        return {updated:true};
       case 'status': return status();
       case 'board': return request.data?.json ? board.snapshot : formatBoard(kernel.events);
       case 'inspect': return kernel.report();
@@ -179,7 +199,7 @@ export async function startRuntime(options: {
     if ((options.subagentDemo ?? saved?.subagentDemo) && worker.mode === 'pi') throw new Error('--subagent-demo is for scripted or pi-faux; live agents decide whether to delegate');
     const timeoutMs = Number(saved?.timeoutMs ?? options.timeoutMs ?? 30000);
     // Construct the kernel before spawning so configuration errors cannot leak processes.
-    kernel = new Kernel({ journal, topology: 'pubsub', runId: options.runId, workerLabel, authMode: worker.authMode,
+    kernel = new Kernel({ requireApproval: options.requireApproval, journal, topology: 'pubsub', runId: options.runId, workerLabel, authMode: worker.authMode,
       maxConcurrentAgents: options.maxConcurrentAgents, features: options.features, subagentLimit: options.subagentLimit, subagentDemo: options.subagentDemo, scenario: options.scenario,
       timeoutMs, maxAttempts: options.maxAttempts, signal: lifetime.signal, worker: request => {
         const owner = ({ analyze: 'analyst', review: 'reviewer', report: 'reporter' } as const)[request.stage];

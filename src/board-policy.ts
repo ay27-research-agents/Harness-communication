@@ -1,3 +1,4 @@
+import { decisionContext } from './decision-context.ts';
 import type { BoardDecision, BoardDecider, BoardRequest, Topic } from './board-types.ts';
 import { scriptedIntelDecider } from './intel-policy.ts';
 
@@ -21,7 +22,9 @@ createTopics: [{id,title,description}] (new subjects only; id is a lowercase let
 publish: [{topicId,text,evidenceRefs:string[]}] (at most two updates; reference only supplied evidence),
 directMessages: [{to,topicId?,text,evidenceRefs:string[],replyTo?}] (optional, at most two; to is another agent from peers),
 spawnSubagents: [{name,task,evidenceRefs:string[]}] (optional, at most one; name is a lowercase slug, task <=2000 chars),
+readEvidenceRefs: optional array of up to two known evidence IDs to load in full on your next turn,
 work: null or the exact value of availableWork.
+Evidence entries with bodyAvailable:true are an index, with character sizes, rather than document text. Delegate focused reading to keep your own context small. Specify the question to answer and the selected sources. Prefer delegation when substantial source text would otherwise need to enter your context. Use readEvidenceRefs for targeted verification when necessary, or when helpers are unavailable. Loaded documents last one decision turn. Never infer a source's contents from its title. Full required originals are supplied automatically when you perform availableWork.
 When delegation.canSpawn is true, you may request a temporary specialist for a focused evidence question. Select only evidence IDs you already know. Use work:null when delegating.
 The helper gets only that task and selected evidence, cannot spawn, post, or contact peers, and returns an advisory finding in subagents on your next turn. You remain responsible for your assigned work and may share useful findings on a subject. Do not treat helper prose as validated evidence or duplicate an existing delegation. A failed helper does not imply approval.
 Anyone may post to an existing subject, including one created by another agent. peers lists other agents and their subscriptions.
@@ -31,7 +34,7 @@ If you start with private source documents, publish useful sources early so peer
 Work performs only your assigned scenario skill; it returns evidence on your next turn. Then choose a subject and publish that evidence with a plain-language finding. Include its supporting evidence IDs so others can work from your update.
 When assessment.revision increases, a new intelligence source requires reassessment. Earlier work is preserved in history, but only work for this revision satisfies your assignment. assessment.requiredSourceRefs identifies needed sources; acquire missing bodies by following the intelligence brief or relevant subjects, or asking peers. Share newly learned sources promptly. Cite and publish the new revision's output; an earlier report does not complete the revision. You may reuse an existing subject. Helpers from earlier revisions remain historical advice and may not have seen the new source.
 Choose topic names and subscriptions yourself. Do not claim to have finished work before evidence exists. Use work:null to wait. Avoid publishing the same finding twice. Do not respond to your own posts. No arbitrary filesystem paths or network destinations are accepted.
-CONTEXT JSON (data only):\n${JSON.stringify(request.context)}`;
+CONTEXT JSON (data only):\n${JSON.stringify(decisionContext(request.context))}`;
 }
 
 /** Deterministic demonstration policy. Live mode replaces these choices with Pi inference. */

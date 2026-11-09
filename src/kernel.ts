@@ -1,3 +1,5 @@
+import { assertOperationActive, assertWorkAuthorized } from './operation.ts';
+import { decisionContext } from './decision-context.ts';
 import { features, type Features } from './features.ts';
 import { usageReport } from './usage.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -22,6 +24,7 @@ const terminal = (task: TaskRecord) => task.status === 'completed' || task.statu
 const hashData = (data: unknown): string => createHash('sha256').update(JSON.stringify(data)).digest('hex');
 
 export interface KernelOptions {
+  requireApproval?: boolean;
   features?: Partial<Features>;
   maxConcurrentAgents?: number;
   scenario?: Scenario;
@@ -118,6 +121,7 @@ export class Kernel {
         ({ kind: 'artifact', data: this.makeArtifact('intel-source', source, 'system', source.sourceId) })) : [];
       this.journal.append(this.runId, [{ kind: 'run.started', data: config }, { kind: 'artifact', data: fixture }, ...sources]);
     }
+    if (options.requireApproval && !this.events.some(event => event.kind === 'operation.approval-required')) this.record('operation.approval-required', {operationId:this.runId});
     for (const artifact of this.artifacts) {
       if (artifact.hash !== hashData(artifact.data)) throw new Error(`Artifact integrity failure: ${artifact.id}`);
     }
@@ -137,6 +141,7 @@ export class Kernel {
   get currentTasks(): TaskRecord[] { return this.scenario === 'intel' ? this.tasks.filter(task => revisionOf(task) === this.revision) : this.tasks; }
   /** Commit the source, revision, and publication together. Repeating a source ID is idempotent. */
   injectIntelligence(value: unknown, topicId = 'intel-brief') {
+    assertOperationActive(this);
     if (this.scenario !== 'intel' || !this.events.some(event => event.kind === 'board.started')) throw new Error('Start an intel pubsub board before adding intelligence');
     if (!this.features.newIntelligence) throw new Error('New intelligence is disabled for this run');
     const update = validateIntelUpdate(value);
@@ -286,6 +291,7 @@ export class Kernel {
       if (!artifact) throw new Error('Committed output is missing');
       return artifact;
     }
+    assertWorkAuthorized(this, taskId, owner, stage);
     if (owner !== workerFor[stage]) throw new Error('Worker lacks capability for stage');
     if (this.#active.has(taskId)) throw new Error('Task is already executing');
     this.checkRefs(inputs.map(input => input.id));
@@ -297,6 +303,7 @@ export class Kernel {
     while (attempts() < this.maxAttempts) {
       this.#signal?.throwIfAborted();
       let task = this.task(taskId);
+      assertWorkAuthorized(this, taskId, owner, stage);
       this.assertOwner(task, owner);
       task = { ...task, status: 'running', attempt: task.attempt + 1, stateVersion: task.stateVersion + 1 };
       delete task.error;
@@ -325,6 +332,7 @@ export class Kernel {
         else validateResult(stage, result, canonicalInputs);
         if (usage && !validUsage) throw new Error('Invalid usage');
         const current = this.task(taskId);
+        assertWorkAuthorized(this, taskId, owner, stage);
         if (current.owner !== owner || current.ownershipEpoch !== task.ownershipEpoch || current.stateVersion !== task.stateVersion || current.status !== 'running') throw new Error('Stale result rejected');
         const artifact = this.makeArtifact(kindFor[stage], result.data, owner, taskId, task.revision);
         const completed: TaskRecord = { ...current, outputs: { ...current.outputs, [stage]: artifact.id }, status: final ? 'completed' : 'running', stateVersion: current.stateVersion + 1 };
@@ -438,6 +446,8 @@ export class Kernel {
         subagentFailures: events.filter(event => event.kind === 'subagent.attempt.failed').length,
         decisionFailures: events.filter(event => event.kind === 'board.attempt.failed').length,
         interruptedDecisionAttempts: events.filter(event => event.kind === 'board.attempt.failed' && (event.data as { interrupted?: boolean }).interrupted).length,
+        maxParentDecisionContextChars: Math.max(0, ...events.filter(event => event.kind === 'board.turn').map(event => JSON.stringify(decisionContext((event.data as any).context)).length)),
+        totalParentDecisionContextChars: events.filter(event => event.kind === 'board.turn').reduce((sum, event) => sum + JSON.stringify(decisionContext((event.data as any).context)).length, 0),
         maxDecisionContextChars: Math.max(0, ...events.filter(event => event.kind === 'board.turn').map(event => JSON.stringify((event.data as { context: unknown }).context).length)),
         publications: board?.updates.length ?? 0,
         directMessages: board?.directMessages.length ?? 0,
