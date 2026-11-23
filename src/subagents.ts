@@ -79,6 +79,7 @@ export async function runSubagentTask(kernel: Kernel, task: SubagentTask, worker
   while (starts().length < kernel.maxAttempts) {
     signal?.throwIfAborted();
     const attempt = starts().length + 1;
+    const attemptStart = performance.now();
     kernel.record('subagent.attempt.started', { id: task.id, parent: task.parent, attempt, context });
     const controller = new AbortController();
     const abort = () => controller.abort(new Error('Supervisor stopped'));
@@ -93,15 +94,16 @@ export async function runSubagentTask(kernel: Kernel, task: SubagentTask, worker
       controller.signal.throwIfAborted();
       const usage = response?.usage;
       const valid = usage && Number.isFinite(usage.input) && Number.isFinite(usage.output) && usage.input >= 0 && usage.output >= 0;
-      kernel.record('subagent.response', { id: task.id, attempt, usage: valid ? usage : null });
+      kernel.record('subagent.response', { id: task.id, attempt, usage: valid ? usage : null, telemetry: response.telemetry ?? null });
+      if (response.inferenceError) throw new Error(response.inferenceError);
       if (usage && !valid) throw new Error('Invalid subagent usage');
-      if (JSON.stringify(response).length > 16000) throw new Error('Subagent output exceeds budget');
+      if (JSON.stringify({...response, telemetry:undefined}).length > 16000) throw new Error('Subagent output exceeds budget');
       const result = validateSubagentFinding(response.data, context);
-      kernel.record('subagent.completed', { id: task.id, result });
+      kernel.record('subagent.completed', { id: task.id, result, attempt, elapsedMs:performance.now()-attemptStart });
       return;
     } catch (error) {
       if (kernel.events.some(event => event.kind === 'subagent.completed' && (event.data as { id: string }).id === task.id)) throw error;
-      kernel.record('subagent.attempt.failed', { id: task.id, attempt, error: error instanceof Error ? error.message : String(error) });
+      kernel.record('subagent.attempt.failed', { id: task.id, attempt, elapsedMs:performance.now()-attemptStart, error: error instanceof Error ? error.message : String(error) });
       if (signal?.aborted) throw error;
     } finally {
       if (timer) clearTimeout(timer);

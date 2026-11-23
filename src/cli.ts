@@ -1,4 +1,5 @@
 import { features } from './features.ts';
+import { exportResearch, researchManifest } from './research.ts';
 import { runBenchmark } from './benchmark.ts';
 import { parseArgs } from 'node:util';
 import { mkdirSync, readFileSync, statSync, writeFileSync } from 'node:fs';
@@ -48,6 +49,7 @@ Options:
   --no-helpers          Disable temporary helpers
   --no-intelligence     Disable added intelligence sources
   --max-concurrent-agents N  Active agent limit, 1..3; default 1, saved per run
+  --transport MODE      Benchmark transport: inline (default) or socket
   --repeats N           Benchmark repetitions per configuration, 1..20
   --dashboard           Start a local visual dashboard with serve
   --source PATH         Dated intelligence source JSON for inject (intel only)
@@ -95,7 +97,7 @@ function summary(report: ReturnType<Kernel['report']>) {
 
 export async function main(args = process.argv.slice(2)): Promise<void> {
   const { values, positionals } = parseArgs({ args, allowPositionals: true, options: {
-    'max-concurrent-agents': {type:'string'}, 'no-direct': {type:'boolean'}, 'no-subjects': {type:'boolean'}, 'no-helpers': {type:'boolean'}, 'no-intelligence': {type:'boolean'}, repeats: {type:'string'},
+    transport:{type:'string'}, 'max-concurrent-agents': {type:'string'}, 'no-direct': {type:'boolean'}, 'no-subjects': {type:'boolean'}, 'no-helpers': {type:'boolean'}, 'no-intelligence': {type:'boolean'}, repeats: {type:'string'},
     'require-approval': {type:'boolean'}, stage: {type:'string'}, 'task-id': {type:'string'}, 'message-type': {type:'string'}, 'expires-at': {type:'string'}, readers: {type:'string'}, writers: {type:'string'}, db: { type: 'string' }, worker: { type: 'string' }, provider: { type: 'string' }, model: { type: 'string' }, auth: { type: 'string' }, scenario: { type: 'string' },
     'pi-package': { type: 'string' }, duplicates: { type: 'boolean' }, 'fail-once': { type: 'string' },
     timeout: { type: 'string' }, 'max-attempts': { type: 'string' }, output: { type: 'string' },
@@ -114,18 +116,19 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
   const featureFlags = ['no-direct','no-subjects','no-helpers','no-intelligence'] as const;
   const selectedFeatures = featureFlags.some(key => values[key]) ? features({ directMessages: !values['no-direct'], sharedSubjects: !values['no-subjects'], helpers: !values['no-helpers'], newIntelligence: !values['no-intelligence'] }) : undefined;
   if (selectedFeatures && !['run','serve','resume','benchmark'].includes(command)) throw new Error('Feature flags require a new run or matching resume');
+  if(values.transport && command !== 'benchmark')throw new Error('--transport requires benchmark');
   if (values.repeats && command !== 'benchmark') throw new Error('--repeats requires benchmark');
   if (command === 'benchmark') {
-    const allowed = new Set(['max-concurrent-agents','worker','provider','model','auth','scenario','pi-package','timeout','output','json','repeats',...featureFlags]);
+    const allowed = new Set(['transport','max-concurrent-agents','worker','provider','model','auth','scenario','pi-package','timeout','output','json','repeats',...featureFlags]);
     for (const key of Object.keys(values)) if (!allowed.has(key)) throw new Error('Unsupported benchmark option: --' + key);
     if (positionals.length !== 1) throw new Error('benchmark does not take positional arguments');
     if (values.auth && !['environment','pi-login'].includes(values.auth)) throw new Error('--auth must be environment or pi-login');
-    const result = await runBenchmark({ maxConcurrentAgents, directory: resolve(values.output ?? 'runs/benchmarks'), repeats: numberOption(values.repeats, '--repeats'),
+    const result = await runBenchmark({ transport:values.transport as "inline"|"socket"|undefined, maxConcurrentAgents, directory: resolve(values.output ?? 'runs/benchmarks'), repeats: numberOption(values.repeats, '--repeats'),
       scenario: (values.scenario ?? 'intel') as Scenario,
       configurations: selectedFeatures ? [{ name: 'custom', features: selectedFeatures }] : undefined,
       worker: { mode: (values.worker ?? 'scripted') as WorkerMode, provider: values.provider, model: values.model,
         authMode: values.auth as 'environment' | 'pi-login' | undefined, timeoutMs: numberOption(values.timeout, '--timeout'), packagePath: values['pi-package'] } });
-    if (values.json) console.log(JSON.stringify(result, null, 2)); else { console.log('Worker: ' + result.worker + ' · Usage: ' + (result.rows[0]?.report.usage.measurement ?? 'unavailable') + ' · Transport: inline · Active agent limit: ' + result.maxConcurrentAgents); console.table(result.summary); console.log('Results: ' + result.directory); }
+    if (values.json) console.log(JSON.stringify(result, null, 2)); else { console.log('Worker: ' + result.worker + ' · Usage: ' + (result.rows[0]?.report.usage.measurement ?? 'unavailable') + ' · Transport: ' + result.transport + ' · Active agent limit: ' + result.maxConcurrentAgents); console.table(result.summary); console.log('Results: ' + result.directory); }
     return;
   }
   if (selectedFeatures && command === 'run' && positionals[1] !== 'pubsub') throw new Error('Feature switches require pubsub');
@@ -194,7 +197,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
       const path = resolve(values.output ?? `runs/${positionals[1]}.json`);
       mkdirSync(dirname(path), { recursive: true });
       writeFileSync(path, JSON.stringify(result, null, 2) + '\n');
-      console.log(`Exported report and events: ${path}`);
+      exportResearch(path + ".research", (result as any).events ?? [], researchManifest({origin:"existing-run-export", originalManifestAvailable:false}));
+      console.log(`Exported report and events: ${path}; research bundle: ${path}.research`);
     } else console.log(typeof result === 'string' ? result : JSON.stringify(result, null, 2));
     return;
   }
@@ -257,7 +261,8 @@ export async function main(args = process.argv.slice(2)): Promise<void> {
         const path = resolve(values.output ?? `runs/${savedId}.json`);
         mkdirSync(dirname(path), { recursive: true });
         writeFileSync(path, JSON.stringify({ report, events: savedEvents }, null, 2) + '\n');
-        console.log(`Exported report, evidence, context manifests and events: ${path}`);
+        exportResearch(path + ".research", savedEvents, researchManifest({origin:"existing-run-export", originalManifestAvailable:false}));
+        console.log(`Exported report, evidence, context manifests and events: ${path}; research bundle: ${path}.research`);
       } else if (values.json) console.log(JSON.stringify(report, null, 2));
       else {
         console.table([summary(report)]);

@@ -52,6 +52,8 @@ export interface WorkRequest {
 export interface WorkResult {
   data: unknown;
   summary: string;
+  inferenceError?: string;
+  telemetry?: import("./research.ts").CallTelemetry;
   usage?: { input: number; output: number; cacheRead?: number; cacheWrite?: number };
 }
 export type Worker = (request: WorkRequest) => Promise<WorkResult>;

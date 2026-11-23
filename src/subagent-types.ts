@@ -15,6 +15,7 @@ export function subagentSnapshot(events: JournalEvent[]): SubagentRecord[] {
     const task = event.data as SubagentTask;
     const terminal = events.findLast(item => ['subagent.completed', 'subagent.failed'].includes(item.kind) && (item.data as { id: string }).id === task.id);
     return { ...task, status: terminal?.kind === 'subagent.completed' ? 'completed' : terminal ? 'failed' : 'pending',
-      ...(terminal ? terminal.data as { result?: SubagentFinding; error?: string } : {}) };
+      ...(terminal?.kind === 'subagent.completed' ? {result:(terminal.data as {result:SubagentFinding}).result} : {}),
+      ...(terminal?.kind === 'subagent.failed' ? {error:(terminal.data as {error:string}).error} : {}) };
   });
 }

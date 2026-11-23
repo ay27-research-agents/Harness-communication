@@ -326,8 +326,9 @@ export class Kernel {
         if (controller.signal.aborted) throw new Error('Worker was cancelled');
         const usage = result?.usage;
         const validUsage = usage && Number.isFinite(usage.input) && Number.isFinite(usage.output) && usage.input >= 0 && usage.output >= 0;
-        this.record('worker.response', { taskId, stage, attempt: task.attempt, usage: validUsage ? usage : null });
-        if (JSON.stringify(result).length > 64000) throw new Error('Result exceeds 64000 characters');
+        this.record('worker.response', { taskId, stage, attempt: task.attempt, usage: validUsage ? usage : null, telemetry: result.telemetry ?? null });
+        if (result.inferenceError) throw new Error(result.inferenceError);
+        if (JSON.stringify({...result, telemetry:undefined}).length > 64000) throw new Error('Result exceeds 64000 characters');
         if (this.scenario === 'intel') validateIntelResult(stage, result, canonicalInputs);
         else validateResult(stage, result, canonicalInputs);
         if (usage && !validUsage) throw new Error('Invalid usage');
@@ -337,7 +338,7 @@ export class Kernel {
         const artifact = this.makeArtifact(kindFor[stage], result.data, owner, taskId, task.revision);
         const completed: TaskRecord = { ...current, outputs: { ...current.outputs, [stage]: artifact.id }, status: final ? 'completed' : 'running', stateVersion: current.stateVersion + 1 };
         this.journal.append(this.runId, [{ kind: 'artifact', data: artifact }, { kind: 'task', data: completed },
-          { kind: 'result.accepted', data: { taskId, stage, attempt: task.attempt, artifactRef: artifact.id, summary: result.summary, usage: result.usage ?? { input: 0, output: 0 }, elapsedMs: performance.now() - start } }]);
+          { kind: 'result.accepted', data: { taskId, stage, attempt: task.attempt, artifactRef: artifact.id, summary: result.summary, usage: result.usage ?? null, elapsedMs: performance.now() - start } }]);
         return artifact;
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
@@ -451,7 +452,7 @@ export class Kernel {
         maxDecisionContextChars: Math.max(0, ...events.filter(event => event.kind === 'board.turn').map(event => JSON.stringify((event.data as { context: unknown }).context).length)),
         publications: board?.updates.length ?? 0,
         directMessages: board?.directMessages.length ?? 0,
-        directDeliveries: events.filter(event => event.kind === 'board.direct.received').length,
+        directDeliveries: events.filter(event => event.kind === 'board.direct.received' && !(event.data as any).status).length,
         directProcessed: events.filter(event => event.kind === 'receipt' && String((event.data as { key: string }).key).startsWith('direct:')).length,
         subscriptions: board?.agents.reduce((sum, agent) => sum + agent.subscriptions.length, 0) ?? 0,
         failedAttempts: events.filter(event => event.kind === 'attempt.failed').length,

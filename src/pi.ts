@@ -1,3 +1,5 @@
+import { collectUsage } from './research.ts';
+import { randomUUID } from 'node:crypto';
 import { access, readFile } from 'node:fs/promises';
 import { createRequire } from 'node:module';
 import { homedir } from 'node:os';
@@ -237,6 +239,11 @@ async function createPiResponder<T extends { signal?: AbortSignal }>(
   return async (request: T): Promise<WorkResult> => {
     request.signal?.throwIfAborted();
     const prompt = buildPrompt(request);
+    const callId = randomUUID(), startedAt = new Date().toISOString(), callStart = performance.now();
+    const telemetry = () => {
+      const messages = agent.state.messages.filter((m: any) => m.role === "assistant");
+      return {callId, startedAt, finishedAt:new Date().toISOString(), elapsedMs:performance.now()-callStart, provider:options.provider, model:options.model, systemPrompt:instructions, prompt, rawResponse:messages.map((m:any) => m.content), rawUsage:messages.map((m:any) => m.usage ?? null), usageSource:options.provider === "faux" ? "synthetic" : "provider-reported", timeToFirstTokenMs:null, adapterVersion:installation.version};
+    };
     if (prompt.length > 65_536) throw new Error('Pi prompt exceeds the 65,536-character limit.');
     const agent = new core.Agent({
       initialState: { systemPrompt: instructions, model, tools: [], thinkingLevel: 'off' },
@@ -274,18 +281,13 @@ async function createPiResponder<T extends { signal?: AbortSignal }>(
       }
       const text = message.content.filter((block: any) => block.type === 'text').map((block: any) => block.text).join('');
       const result = parseResult(text);
-      result.usage = messages.reduce((sum: {input: number; output: number; cacheRead: number; cacheWrite: number}, current: any) => ({
-        input: sum.input + (current.usage?.input ?? 0) + (current.usage?.cacheRead ?? 0) + (current.usage?.cacheWrite ?? 0),
-        output: sum.output + (current.usage?.output ?? 0),
-        cacheRead: sum.cacheRead + (current.usage?.cacheRead ?? 0),
-        cacheWrite: sum.cacheWrite + (current.usage?.cacheWrite ?? 0),
-      }), { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 });
+      result.usage = collectUsage(messages.map((m:any) => m.usage));
+      result.telemetry = telemetry();
       return result;
     } catch (error) {
-      if (options.authMode === 'pi-login') {
-        throw new Error('Pi saved-login request failed or was cancelled. Check login, model access, connectivity, deadline and JSON response requirements. Provider details are hidden to protect credentials.');
-      }
-      throw error;
+      const measured = telemetry();
+      return {data:null, summary:'Model invocation failed', usage:collectUsage(measured.rawUsage), telemetry:measured,
+        inferenceError: options.authMode === 'pi-login' ? 'Pi saved-login request failed or was cancelled. Check login, model access, connectivity, deadline and JSON response requirements. Provider details are hidden to protect credentials.' : (error instanceof Error ? error.message : String(error))};
     } finally {
       clearTimeout(timer);
       request.signal?.removeEventListener('abort', onAbort);

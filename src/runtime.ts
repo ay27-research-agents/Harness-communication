@@ -287,6 +287,6 @@ export async function startRuntime(options: {
     writeFileSync(descriptorPath(db), JSON.stringify({ version: 1, pid: process.pid, port: server.port, token, runId: kernel.runId }), { mode: 0o600 });
     published = true;
     wake();
-    return { runId: kernel.runId, dashboardUrl: dashboard?.url, status, close, closed, idle: async () => { await pump; } };
+    return { researchSnapshot: () => ({report:kernel.report(),events:kernel.events}), runId: kernel.runId, dashboardUrl: dashboard?.url, status, close, closed, idle: async () => { await pump; } };
   } catch (error) { await close(); throw error; }
 }

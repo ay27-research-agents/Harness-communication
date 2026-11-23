@@ -1,3 +1,4 @@
+import { communicationSecurity } from './communication-security.ts';
 import type { MessageMetadata } from './operation.ts';
 import { assertOperationActive, canAccess, fresh, messageMetadata } from './operation.ts';
 import { createHash, randomUUID } from 'node:crypto';
@@ -177,7 +178,7 @@ export class TopicBoard {
     let directSelected = directUnread.slice(0, 2);
     for (;;) {
       const inbox = selected.map(event => event.data as BoardUpdate);
-      const directInbox = directSelected.map(event => messages.find(message => message.id === (event.data as { id: string }).id)!).filter(fresh);
+      const directInbox = directSelected.map(event => ({ ...messages.find(message => message.id === (event.data as { id: string }).id)!, communicationSecurity: communicationSecurity(event.data as {mode?: unknown}) })).filter(fresh);
       const refs = new Set([...state.knownRefs, ...ownWork.map(item => item.id), ...inbox.flatMap(post => post.evidenceRefs), ...directInbox.flatMap(message => message.evidenceRefs)]);
       const evidence = this.kernel.currentArtifacts.filter(artifact => refs.has(artifact.id));
       const profiles = this.kernel.scenario === 'intel' ? intelProfiles : agentProfiles;
@@ -254,8 +255,9 @@ export class TopicBoard {
         controller.signal.throwIfAborted();
         const usage = response?.usage;
         const validUsage = usage && Number.isFinite(usage.input) && Number.isFinite(usage.output) && usage.input >= 0 && usage.output >= 0;
-        this.append([{ kind: 'board.response', data: { turnId: turn.id, attempt, usage: validUsage ? usage : null } }]);
-        if (JSON.stringify(response).length > 32000) throw new Error('Board decision exceeds output budget');
+        this.append([{ kind: 'board.response', data: { turnId: turn.id, attempt, usage: validUsage ? usage : null, telemetry: response.telemetry ?? null } }]);
+        if (response.inferenceError) throw new Error(response.inferenceError);
+        if (JSON.stringify({...response, telemetry:undefined}).length > 32000) throw new Error('Board decision exceeds output budget');
         if (usage && !validUsage) throw new Error('Invalid decision usage');
         const decision = validateDecision(response.data, turn.context);
         this.append([{ kind: 'board.decision', data: { turnId: turn.id, agent: turn.agent, attempt, decision, elapsedMs: performance.now() - started } }]);
@@ -460,8 +462,16 @@ export class TopicBoard {
         this.append([{kind:'board.direct.received',data:{id:message.id,to:message.to,status:'expired'}}]);
         continue;
       }
-      if (this.options.sendDirect) await this.options.sendDirect(message);
-      else this.receiveDirect(message);
+      const attemptId = randomUUID(), sendStart = performance.now();
+      this.append([{kind:'board.direct.send.started',data:{id:message.id,to:message.to,attemptId}}]);
+      try {
+        if (this.options.sendDirect) await this.options.sendDirect(message);
+        else this.receiveDirect(message);
+        this.append([{kind:'board.direct.send.acknowledged',data:{id:message.id,to:message.to,attemptId,elapsedMs:performance.now()-sendStart}}]);
+      } catch(error) {
+        this.append([{kind:'board.direct.send.failed',data:{id:message.id,to:message.to,attemptId,elapsedMs:performance.now()-sendStart,error:error instanceof Error?error.message:String(error)}}]);
+        throw error;
+      }
     }
   }
   direct(to: WorkerId, text: string, topicId?: string, metadata: Partial<MessageMetadata> = {}): DirectMessage {
@@ -578,3 +588,4 @@ export function writeBoardFiles(events: JournalEvent[], directory: string, runId
     if (['fixture', 'analysis', 'review', 'report'].includes(artifact.kind)) write(`evidence/${artifact.kind}.json`, JSON.stringify(artifact, null, 2) + '\n');
   }
 }
+

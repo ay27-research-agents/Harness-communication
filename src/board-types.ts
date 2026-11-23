@@ -9,6 +9,8 @@ export interface DirectPost {
   to: WorkerId; topicId?: string; text: string; evidenceRefs: string[]; replyTo?: string;
 }
 export interface DirectMessage extends DirectPost, Partial<MessageMetadata> {
+  /** Receiver-generated metadata; present in agent context, not sender-controlled content. */
+  communicationSecurity?: ReturnType<typeof import('./communication-security.ts').communicationSecurity>;
   id: string; from: WorkerId | 'user'; createdAt: string;
 }
 export interface BoardUpdate extends Partial<MessageMetadata> {
@@ -85,3 +87,4 @@ export function boardSnapshot(events: JournalEvent[]) {
   return { topics, updates, directMessages, deliveryStatus, subagents: subagentSnapshot(events), agents: [...agents.values()], decisions,
     settled: Boolean(settled && (!activity || settled.seq > activity.seq)) };
 }
+

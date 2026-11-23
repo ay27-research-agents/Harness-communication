@@ -61,9 +61,12 @@ test('model-reported usage is replaced with actual SDK usage', offlineSdk, async
 
 test('actual SDK text still must satisfy the response schema', offlineSdk, async () => {
   const missingData = await faux([{ data: undefined, summary: 'Missing required data.' }]);
-  await assert.rejects(missingData(request()), /containing data and summary/);
+  const invalid = await missingData(request());
+  assert.match(invalid.inferenceError!, /containing data and summary/);
+  assert.ok(invalid.usage!.input >= 0);
+  assert.ok(invalid.telemetry!.rawResponse.length);
   const oversizedSummary = await faux([{ data: {}, summary: 'x'.repeat(2_001) }]);
-  await assert.rejects(oversizedSummary(request()), /at most 2,000/);
+  assert.match((await oversizedSummary(request())).inferenceError!, /at most 2,000/);
 });
 
 test('pre-cancelled requests never consume a faux model response', offlineSdk, async () => {
